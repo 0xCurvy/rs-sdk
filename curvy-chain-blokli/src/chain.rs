@@ -148,7 +148,7 @@ fn dec_to_hex32(value: &Dec) -> Result<String> {
 /// Convert blokli's human-readable `TokenValueString` into base units (wei).
 ///
 /// `nativeBalance.balance` arrives as `"<amount> <currency>"` where the amount is
-/// explicitly *not* wei — `Balance::amount_in_base_units` scales by the currency's 18
+/// explicitly *not* wei - `Balance::amount_in_base_units` scales by the currency's 18
 /// decimals and trims trailing zeros. Rescaling is exact (18 decimals covers every wei
 /// digit), and it must be, because the acceptance flow asserts an exact wei delta
 /// across a withdrawal.

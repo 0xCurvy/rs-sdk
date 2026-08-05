@@ -1,4 +1,4 @@
-//! `CurvyClient` — the thin facade that drives deposit → commit → PIX aggregation → scan
+//! `CurvyClient` - the thin facade that drives deposit → commit → PIX aggregation → scan
 //! over the L2 trait objects, `curvy-abi` calldata/signing, and `curvy-witnesscalc`
 //! proving. All crypto/proving runs under `spawn_blocking` so tokio is never blocked.
 //! Minimal in-memory storage (the mirrored global IMT leaf log).
@@ -122,7 +122,7 @@ pub struct PixAggregationResult {
 
 #[derive(Default)]
 struct Storage {
-    /// The committed global-IMT leaf log (note ids in insertion order) — mirrors chain.
+    /// The committed global-IMT leaf log (note ids in insertion order) - mirrors chain.
     tree_leaves: Vec<Fr>,
 }
 
@@ -256,7 +256,7 @@ impl CurvyClient {
         let token_dec = token.to_string();
 
         // Seal a note to the recipient (ownerHash depends only on owner+sharedSecret,
-        // not amount — so the gross here does not affect it).
+        // not amount - so the gross here does not affect it).
         let sealed = seal_note(&recipient.identity(), u128_fr(gross), token_fr)?;
         let owner_hash_dec = fr_to_dec(&sealed.owner_hash());
 
@@ -383,7 +383,7 @@ impl CurvyClient {
     /// Leaves come from a checkpoint-pinned snapshot when the backend serves one, and
     /// otherwise from folding the `CommittedNotes` log. Reconciliation against the
     /// chain root is identical either way, so the snapshot is a robustness win rather
-    /// than a change of trust model — see [`leaves_from_events`] for why the fold is
+    /// than a change of trust model - see [`leaves_from_events`] for why the fold is
     /// the weaker of the two.
     pub async fn sync(&self) -> Result<Vec<Fr>> {
         let mut last_local_root = String::new();
@@ -410,7 +410,7 @@ impl CurvyClient {
     ///
     /// The fallback for backends that cannot serve a leaf-indexed snapshot (a plain
     /// `eth_getLogs` reader has no tree frontier to derive positions from). It infers
-    /// each leaf's position from event arrival order — batch order, then position
+    /// each leaf's position from event arrival order - batch order, then position
     /// within the batch, skipping the zero-id padding slots exactly as the aggregator
     /// does. That reproduces the on-chain tree only while the index reports events in
     /// chain order, an assumption the event log itself never states; a wrong order
@@ -665,15 +665,15 @@ impl CurvyClient {
     /// change note, an optional relayer gas-reimbursement note, zero pads up to nine
     /// regular outputs, and one fee note. Submitted as verifier profile `(2, 9)`.
     ///
-    /// The circuit emits `maxOutputs + 1` notes — nine regular outputs plus the fee
-    /// note in its own constrained slot — so the ten-note shape PIX needs is
+    /// The circuit emits `maxOutputs + 1` notes - nine regular outputs plus the fee
+    /// note in its own constrained slot - so the ten-note shape PIX needs is
     /// `7 allocations + change + relayer` across the nine, with the protocol fee note
     /// separate. Passing a `relayer` therefore drops the allocation ceiling from eight
     /// to seven.
     ///
     /// The relayer note is an **ordinary** output: nothing in the circuit constrains
     /// its owner or amount (only the fee note is constrained). Production relies on
-    /// the relayer checking it before relaying — it trial-decrypts the aggregation's
+    /// the relayer checking it before relaying - it trial-decrypts the aggregation's
     /// output notes, refuses to submit when none is addressed to it, and refuses again
     /// when the amount is under its live gas quote plus tolerance. So `relayer_amount`
     /// must be sized against that quote, not guessed.
@@ -1280,7 +1280,7 @@ impl CurvyClient {
 /// How one PIX aggregation splits its input value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixValueSplit {
-    /// Output value the spender does not own — the protocol fee base.
+    /// Output value the spender does not own - the protocol fee base.
     pub spent_to_others: u128,
     /// The fee note's amount: `gasFee + floor(spent_to_others * rate / 1000)`.
     pub fee_amount: u128,
@@ -1292,7 +1292,7 @@ pub struct PixValueSplit {
 ///
 /// The circuit accumulates `totalSpentValue += amount * (1 - isSender)` over the
 /// regular outputs, so the protocol fee is charged on every output the spender does
-/// **not** own — allocations *and* the relayer's gas-reimbursement note — while change
+/// **not** own - allocations *and* the relayer's gas-reimbursement note - while change
 /// and the zero pads (owned by the spender) are excluded. It then constrains
 /// `feeNote.amount === gasFee + protocolFeeQ` and
 /// `totalOutputValue === totalInputValue - feeNote.amount`.
@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn relayer_note_is_part_of_the_protocol_fee_base() {
         // The circuit charges outputs the spender does not own, so adding a relayer
-        // note must raise the fee — not merely reduce the change by its face value.
+        // note must raise the fee - not merely reduce the change by its face value.
         let without = pix_value_split(1_000_000, 100_000, 0, GAS, RATE).unwrap();
         let with = pix_value_split(1_000_000, 100_000, 10_000, GAS, RATE).unwrap();
 

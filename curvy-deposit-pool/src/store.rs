@@ -2,7 +2,7 @@
 //!
 //! Losing this state loses money. A note's `ownerHash` is
 //! `poseidon(ownerPub, sharedSecret)` and the shared secret is chosen by the pool at
-//! allocation time — it is never derivable from the deposit key HOPR later hands back.
+//! allocation time - it is never derivable from the deposit key HOPR later hands back.
 //! So a pool that forgets its mapping cannot locate the notes it owes, and the funds sit
 //! on-chain, provably unspent and permanently unreachable.
 //!
@@ -86,7 +86,7 @@ pub struct PersistedState {
 /// Where a pool keeps its state.
 ///
 /// A seam rather than a hard-coded file so a node can put this in whatever it already
-/// trusts — an encrypted store, a database, a test's memory.
+/// trusts - an encrypted store, a database, a test's memory.
 pub trait DepositStore: Send + Sync {
     fn load(&self) -> anyhow::Result<PersistedState>;
     fn save(&self, state: &PersistedState) -> anyhow::Result<()>;

@@ -1,7 +1,7 @@
 //! alloy bindings + calldata/signing/decoding for the deployed Curvy contracts.
 //!
 //! The four `sol!` modules ([`bindings`]) are generated at compile time from the
-//! VENDORED `abi/*.abi.json` files (see `abi/README.md`) — the circuit repository is never read at
+//! VENDORED `abi/*.abi.json` files (see `abi/README.md`) - the circuit repository is never read at
 //! build or run time. Everything the SDK calls here speaks NEUTRAL types
 //! (`curvy-types` decimal strings / `RawTx`), so `curvy-sdk` never names alloy.
 //!
@@ -72,7 +72,7 @@ fn u256_arr2(a: &[Dec; 2]) -> Result<[U256; 2]> {
 
 /// Convert a snarkjs-shaped proof JSON + public-signals JSON into the on-chain proof
 /// shape. `pi_a`/`pi_c` (G1) pass through; each `pi_b` (G2) coordinate pair is
-/// swapped `[c0,c1] → [c1,c0]` — the Ethereum pairing precompile convention that
+/// swapped `[c0,c1] → [c1,c0]` - the Ethereum pairing precompile convention that
 /// `snarkjs generatecall` encodes. Public signals pass through in witness order.
 pub fn proof_from_snarkjs(proof_json: &str) -> Result<Groth16Proof> {
     let p: serde_json::Value = serde_json::from_str(proof_json).context("parse snarkjs proof")?;
@@ -222,7 +222,7 @@ pub struct CallTx<'a> {
 }
 
 /// Build a legacy (EIP-155) transaction, sign it locally, and
-/// return the EIP-2718-encoded raw bytes — exactly what blokli `sendTransactionSync`
+/// return the EIP-2718-encoded raw bytes - exactly what blokli `sendTransactionSync`
 /// / `eth_sendRawTransaction` take. Purely local: nonce/gas/gas_price are supplied by
 /// the caller (read via `BalanceReader`), so no provider is needed here.
 pub fn sign_call_tx(call: CallTx<'_>) -> Result<RawTx> {

@@ -1,8 +1,8 @@
 //! Neutral domain types exchanged across the `curvy-chain-api` trait seams.
 //!
 //! The whole point of this crate is that **no backend type leaks through the
-//! seam**: field elements and `uint256`s ride as decimal strings ([`Dec`]) — the
-//! same boundary `curvy-core` speaks — addresses as `"0x…"` hex ([`Addr`]), and a
+//! seam**: field elements and `uint256`s ride as decimal strings ([`Dec`]) - the
+//! same boundary `curvy-core` speaks - addresses as `"0x…"` hex ([`Addr`]), and a
 //! pre-signed transaction as raw bytes ([`RawTx`]). The adapter crates
 //! (`curvy-chain-rpc`, `curvy-chain-blokli`, `curvy-abi`) translate to/from alloy;
 //! `curvy-sdk` consumes only these types + `curvy-core`, so the seam is real.
@@ -56,8 +56,8 @@ pub struct PendingNotesEvent {
 
 /// A dense, checkpoint-pinned snapshot of the committed notes tree.
 ///
-/// The alternative — folding `CommittedNotes` events and trusting their arrival order
-/// to reproduce leaf positions — makes the tree root depend on an ordering the event
+/// The alternative - folding `CommittedNotes` events and trusting their arrival order
+/// to reproduce leaf positions - makes the tree root depend on an ordering the event
 /// log never states. Here each leaf's position is served explicitly, pinned to one
 /// immutable checkpoint so pages cannot straddle a commit.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,9 +107,9 @@ pub struct FeeConfig {
     pub withdrawal_fee_bps: u64,
     /// `aggregator.protocolFeePerThousand()` (parts per thousand).
     pub protocol_fee_per_thousand: Dec,
-    /// `aggregator.commitmentFeeRoot()` — the depth-6 per-token gas-fee tree root.
+    /// `aggregator.commitmentFeeRoot()` - the depth-6 per-token gas-fee tree root.
     pub commitment_fee_root: Dec,
-    /// `aggregator.feeNotePublicKey(0/1)` — the protocol fee-collector BabyJubJub key.
+    /// `aggregator.feeNotePublicKey(0/1)` - the protocol fee-collector BabyJubJub key.
     pub fee_note_public_key: [Dec; 2],
     /// `vault.perTokenGasFees(tokenId)` for the registered tokens (index by `token_id`).
     pub per_token_gas_fees: Vec<GasFees>,
@@ -140,7 +140,7 @@ pub struct OnchainNote {
 }
 
 /// A Groth16 proof in the exact on-chain calldata shape (the `pi_b` G2 coordinate
-/// swap already applied — see [`from_snarkjs`](curvy_abi)). `a`/`c` are G1 points,
+/// swap already applied - see [`from_snarkjs`](curvy_abi)). `a`/`c` are G1 points,
 /// `b` is the swapped G2 point.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Groth16Proof {
@@ -149,7 +149,7 @@ pub struct Groth16Proof {
     pub c: [Dec; 2],
 }
 
-/// The aggregator's live tree state (all direct chain reads — never delegated).
+/// The aggregator's live tree state (all direct chain reads - never delegated).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AggregatorState {
     pub current_notes_root: Dec,

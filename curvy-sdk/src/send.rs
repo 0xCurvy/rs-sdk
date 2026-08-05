@@ -1,5 +1,5 @@
 //! Note sealing (stealth send → an on-chain-shaped note), padding notes, the fee
-//! note, and the value math — all mirroring the TS `witnessFromNotes` /
+//! note, and the value math - all mirroring the TS `witnessFromNotes` /
 //! `buildAggregateRequest`.
 
 use anyhow::Result;
@@ -81,7 +81,7 @@ pub fn zero_pad_note(owner_pub: (Fr, Fr), token: Fr, seed: &[u8], counter: u64) 
 ///
 /// The fee note is a **stealth** note: its `noteId`/`nullifier` depend on
 /// `sharedSecret`, and the collector recovers it by recomputing `ECDH(feeViewKey, R)`.
-/// Owning `feeNotePublicKey` is therefore not enough to spend it — with a random
+/// Owning `feeNotePublicKey` is therefore not enough to spend it - with a random
 /// `sharedSecret`/`R` there is nothing for the collector to recompute and the fee is
 /// **permanently uncollectable**.
 ///
@@ -117,7 +117,7 @@ pub fn fee_note(
     })?;
     let sealed = seal_note(recipient, amount, token)?;
     // The circuit constrains the fee note's owner to the on-chain `feeNotePublicKey`,
-    // so a recipient whose BabyJubJub key is anything else cannot be the collector —
+    // so a recipient whose BabyJubJub key is anything else cannot be the collector -
     // catch that here rather than as an unsatisfiable constraint during proving.
     if sealed.owner_pub != fee_pub {
         anyhow::bail!(

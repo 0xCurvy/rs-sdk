@@ -42,7 +42,7 @@ transaction with its label, backend and hash.
 
 Set `CURVY_E2E_SALT=<u64>` to reproduce a specific run against a fresh chain.
 Without it each run salts its own note commitments, which is what makes the flow
-re-runnable against a long-lived stack — a fixed shared secret would replay
+re-runnable against a long-lived stack - a fixed shared secret would replay
 identical commitments and the second run would revert on spent nullifiers.
 
 ## Workspace
@@ -85,7 +85,7 @@ of guessing.
 
 ## Output shape
 
-`VerifyPixAggregation(2, 9, 30, 6)` emits `maxOutputs + 1` notes — nine regular
+`VerifyPixAggregation(2, 9, 30, 6)` emits `maxOutputs + 1` notes - nine regular
 outputs plus the protocol fee note in its own constrained slot:
 
 | slot | note | constrained by the circuit? |
@@ -93,7 +93,7 @@ outputs plus the protocol fee note in its own constrained slot:
 | 1–7 | allocations to PIX owners | no |
 | 8 | change back to the spender | no |
 | 9 | relayer gas reimbursement | no |
-| 10 | protocol fee note | yes — owner is `feeNotePublicKey`, amount is `gasFee + protocolFeeQ` |
+| 10 | protocol fee note | yes - owner is `feeNotePublicKey`, amount is `gasFee + protocolFeeQ` |
 
 Only the fee note is constrained. The relayer note is an ordinary output, exactly
 as in production: the relayer trial-decrypts an aggregation's outputs, refuses to
@@ -102,7 +102,7 @@ live gas quote plus tolerance. That check is what makes the payment safe, not th
 proof.
 
 The circuit charges the protocol fee on every output the spender does *not* own, so
-the relayer note is fee-bearing and `curvy-sdk` sizes the fee note accordingly — see
+the relayer note is fee-bearing and `curvy-sdk` sizes the fee note accordingly - see
 `pix_value_split`.
 
 ## Blokli is the only backend
@@ -121,7 +121,7 @@ test asserts no transaction reports another backend.
 
 This does not weaken the trust model: blokli's `curvy*` resolvers are direct
 contract reads, not indexed state, so the aggregator's notes root is still a chain
-read — merely proxied — and `sync()` reconciles the locally rebuilt tree against it
+read - merely proxied - and `sync()` reconciles the locally rebuilt tree against it
 before anything is spent.
 
 `curvy-chain-blokli` targets the `curvy-events-finalized` schema: union-wrapped
@@ -137,7 +137,7 @@ immutable `(blockHash, noteCount, notesRoot)` and `curvySyncNotes` pages leaves
 against it, each carrying its authoritative `leafIndex`. Pages cannot straddle a
 commit, and the adapter asserts every leaf lands where it claims.
 
-`leaves_from_events` is the fallback for backends that cannot serve a snapshot — a
+`leaves_from_events` is the fallback for backends that cannot serve a snapshot - a
 plain `eth_getLogs` reader has no tree frontier to derive positions from. It is the
 weaker path: it reproduces the on-chain tree only while the index reports events in
 chain order, an assumption the event log never states, and a wrong order yields a
@@ -173,12 +173,12 @@ CURVY_ZK_KEYS_DIR=/absolute/path/to/zk-keys/v2 \
   cargo test --release -p curvy-witnesscalc -- --ignored --nocapture
 ```
 
-`cargo test` needs a C toolchain because `circom-witnesscalc` is a dev-dependency —
+`cargo test` needs a C toolchain because `circom-witnesscalc` is a dev-dependency -
 it is the independent reference the graph-equivalence tests compare against.
 `cargo build` and `cargo run` never touch it.
 
 ## Not implemented, deliberately
 
 `PixSettlement` does not exist in `hopr-api`, and idempotency by `PixAddressId`
-lives in HOPR's own strategy, which caches and tests it — `DepositPool` never
+lives in HOPR's own strategy, which caches and tests it - `DepositPool` never
 receives an id to key on.

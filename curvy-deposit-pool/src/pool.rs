@@ -1,4 +1,4 @@
-//! [`CurvyDepositPool`] — HOPR's `DepositPool` backed by the Curvy privacy pool.
+//! [`CurvyDepositPool`] - HOPR's `DepositPool` backed by the Curvy privacy pool.
 //!
 //! HOPR's trait is per-deposit; the Curvy circuits are fixed-arity `(2,9)` and `(10)`.
 //! Reconciling those is this type's whole job:
@@ -6,7 +6,7 @@
 //! * `deposit_funds_to` enqueues an allocation and flushes the queue as one aggregation
 //!   proof carrying up to [`MAX_ALLOCATIONS_PER_PROOF`] recipients;
 //! * `withdraw_multiple_deposits` overrides the trait's one-at-a-time default and
-//!   spends up to [`MAX_WITHDRAWAL_INPUTS`] notes per proof — the trait explicitly
+//!   spends up to [`MAX_WITHDRAWAL_INPUTS`] notes per proof - the trait explicitly
 //!   invites "pool-native batching", and this is it.
 //!
 //! The pool also keeps the state HOPR cannot: a note's `ownerHash` is
@@ -213,7 +213,7 @@ pub struct CurvyDepositPool {
     state: Arc<Mutex<PoolState>>,
     store: Arc<dyn DepositStore>,
     /// Serialises on-chain work. Two submissions signed by one key must not read the
-    /// same nonce, and a timer-driven flush must not race an inline one — both would
+    /// same nonce, and a timer-driven flush must not race an inline one - both would
     /// produce a transaction that simply never lands.
     chain: tokio::sync::Mutex<()>,
     /// Bumped on every state change so `notify_deposit` can wait for one instead of
@@ -280,7 +280,7 @@ impl CurvyDepositPool {
 
     /// Drive [`flush_pending`](Self::flush_pending) on a timer.
     ///
-    /// Without this — or an explicit flush — a batch that never reaches the threshold
+    /// Without this - or an explicit flush - a batch that never reaches the threshold
     /// sits unproved and its `notify_deposit` never resolves. A deployment should run
     /// one of these; the interval is the worst-case latency a lone deposit sees.
     pub fn spawn_flusher(
@@ -356,8 +356,8 @@ impl CurvyDepositPool {
     /// Drain the allocation queue into one aggregation proof, then commit its outputs
     /// so the allocations become spendable.
     ///
-    /// The queued allocations and the funding note are *reserved* — moved into
-    /// persisted in-flight state — before any chain work, and restored if the proof
+    /// The queued allocations and the funding note are *reserved* - moved into
+    /// persisted in-flight state - before any chain work, and restored if the proof
     /// fails. Draining them outright would lose accepted liabilities on any error, and
     /// leaving them in place would let a retry double-spend the same funding note.
     async fn flush(&self) -> Result<Vec<curvy_sdk::TxLedger>> {
@@ -388,7 +388,7 @@ impl CurvyDepositPool {
                 .iter()
                 .position(|note| note_amount(note).is_some_and(|value| value > needed));
             let Some(index) = index else {
-                // Put the batch back before giving up — it is an accepted liability.
+                // Put the batch back before giving up - it is an accepted liability.
                 state.queue.splice(0..0, batch);
                 self.checkpoint(&state)?;
                 return Err(CurvyPoolError::NoFunding);
@@ -432,7 +432,7 @@ impl CurvyDepositPool {
         };
 
         // The proof landed: record the outputs BEFORE committing them. A commit failure
-        // must not lose notes that already exist on-chain — they only need committing,
+        // must not lose notes that already exist on-chain - they only need committing,
         // which the next flush retries.
         {
             let mut state = self.state.lock().expect("pool state");
@@ -553,7 +553,7 @@ const EXACT_SELECTION_LIMIT: usize = 20;
 /// A "partial" withdrawal selects a **subset of notes**, never a fraction of one: Curvy
 /// notes are atomic, and splitting one would need a whole extra aggregation proof
 /// authorised by the depositor's key. So the pool cannot deliver an exact amount unless
-/// some subset happens to sum to it — and rather than refusing, it delivers the
+/// some subset happens to sum to it - and rather than refusing, it delivers the
 /// **smallest total that still covers the request**, minimising the excess.
 ///
 /// Over-delivery is a deliberate trade: the alternative is failing a withdrawal the
@@ -596,7 +596,7 @@ fn select_notes(notes: &[OwnedNote], target: Option<u128>) -> Result<Vec<OwnedNo
 }
 
 /// The subset whose total covers `target` with the least excess, preferring fewer notes
-/// when two subsets tie — each additional note consumes a slot in a ten-input proof.
+/// when two subsets tie - each additional note consumes a slot in a ten-input proof.
 fn minimal_excess_subset(notes: &[OwnedNote], target: u128) -> Vec<OwnedNote> {
     let amounts: Vec<u128> = notes.iter().map(|n| note_amount(n).unwrap_or(0)).collect();
     let mut best: Option<(u128, u32, usize)> = None;
@@ -638,7 +638,7 @@ impl DepositPool for CurvyDepositPool {
     ///
     /// This **enqueues and returns**; it does not wait for the aggregation proof. The
     /// trait pairs it with `notify_deposit` precisely so a pool can batch, and batching
-    /// is what makes Curvy affordable — one `(2,9)` proof serves seven recipients
+    /// is what makes Curvy affordable - one `(2,9)` proof serves seven recipients
     /// instead of seven proofs serving one each. Callers that need to know the funds
     /// have landed must await `notify_deposit`, which is the only honest signal.
     ///
@@ -681,7 +681,7 @@ impl DepositPool for CurvyDepositPool {
     ///
     /// Since `deposit_funds_to` only enqueues, this is where the caller learns the funds
     /// exist. It waits on a state-change signal rather than polling, and reports the
-    /// amount genuinely recorded — which may exceed `min_amount`, because notes are
+    /// amount genuinely recorded - which may exceed `min_amount`, because notes are
     /// atomic and the pool never splits one to hit an exact figure.
     fn notify_deposit(
         &self,
@@ -751,7 +751,7 @@ impl DepositPool for CurvyDepositPool {
     /// The trait's default fans out one `withdraw_deposit` per key, which for Curvy
     /// would mean one Groth16 proof per deposit. The `(10,30)` profile authorises ten
     /// independently-owned notes in a *single* proof, so ten deposits cost one proof
-    /// instead of ten — the exact case the trait's "implementors may choose a more
+    /// instead of ten - the exact case the trait's "implementors may choose a more
     /// efficient pool-native batching" note anticipates.
     ///
     /// Every note is signed by its own scalar; nothing here assumes the keys are
@@ -794,7 +794,7 @@ impl DepositPool for CurvyDepositPool {
             }
         }
 
-        // Fill proofs to ten inputs across key boundaries — the circuit does not care
+        // Fill proofs to ten inputs across key boundaries - the circuit does not care
         // whether two inputs belong to the same depositor.
         let mut slots: Vec<(usize, &curvy_core::eddsa::ScalarSigningKey, &OwnedNote)> = Vec::new();
         for (index, signer, notes) in &resolved {
@@ -841,7 +841,7 @@ impl DepositPool for CurvyDepositPool {
 
         // Prune per NOTE, not per key. A depositor's notes can span several proofs, so
         // marking the whole depositor failed would leave notes that were genuinely spent
-        // still recorded as spendable — and the next withdrawal would build a proof
+        // still recorded as spendable - and the next withdrawal would build a proof
         // against an already-nullified note.
         {
             let mut state = self.state.lock().expect("pool state");
@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(total(&chosen), 20);
 
         // And a combination wins when no single note is closer: covering 25 from
-        // {10, 12, 20, 50} is best served by 12+20 = 32? No — 10+20 = 30 is tighter.
+        // {10, 12, 20, 50} is best served by 12+20 = 32? No - 10+20 = 30 is tighter.
         let chosen = select_notes(&notes, Some(25)).unwrap();
         assert_eq!(total(&chosen), 30);
     }

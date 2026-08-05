@@ -1,6 +1,6 @@
 //! Bridging HOPR's BabyJubJub keys to Curvy's.
 //!
-//! The two sides run independent implementations of the same curve — HOPR uses
+//! The two sides run independent implementations of the same curve - HOPR uses
 //! `babyjubjub-ec`, Curvy hand-rolls over arkworks with circomlib's `Base8` subgroup
 //! generator. Agreement is therefore a fact to be tested, not assumed: if the two
 //! derived different points from one scalar, every PIX deposit address would name a
@@ -12,7 +12,7 @@ use curvy_core::field::Fr;
 /// Decompress a HOPR `BjjPublicKey` (32-byte compressed point) into Curvy's affine
 /// `(x, y)` field-element pair.
 ///
-/// Parsing goes through `babyjubjub-ec` — the same crate that produced the bytes — so
+/// Parsing goes through `babyjubjub-ec` - the same crate that produced the bytes - so
 /// the compression convention is consistent by construction rather than by assumption.
 pub fn decompress(compressed: &[u8]) -> Option<(Fr, Fr)> {
     use babyjubjub_ec::elliptic_curve::group::GroupEncoding;
@@ -34,8 +34,8 @@ pub fn decompress(compressed: &[u8]) -> Option<(Fr, Fr)> {
 ///
 /// HOPR encodes the scalar BIG-endian (`BjjKeypair::from_secret` on `[0u8; 31] ++ [1]`
 /// yields `Base8`, i.e. scalar 1) while Curvy's constructor takes little-endian, so the
-/// bytes must be reversed. Both sides otherwise agree — same curve, same `Base8`
-/// generator — which is why this is a byte-order bug rather than a design mismatch, and
+/// bytes must be reversed. Both sides otherwise agree - same curve, same `Base8`
+/// generator - which is why this is a byte-order bug rather than a design mismatch, and
 /// why it would have been invisible: every deposit address would simply have named a
 /// note nobody could spend.
 pub fn signing_key(secret_be: &[u8; 32]) -> Option<ScalarSigningKey> {
@@ -116,7 +116,7 @@ mod generator_tests {
         let curvy = ScalarSigningKey::from_decimal("1").expect("scalar 1");
         assert_eq!(fr_to_dec(&curvy.verifying_key().x()), CIRCOMLIB_BASE8_X);
 
-        // HOPR, given 32 bytes whose LAST byte is 1 — which it reads as the scalar 1,
+        // HOPR, given 32 bytes whose LAST byte is 1 - which it reads as the scalar 1,
         // confirming a big-endian secret encoding rather than a different generator.
         let mut secret = [0u8; 32];
         secret[31] = 1;

@@ -1,7 +1,7 @@
 //! Direct-RPC adapters over alloy against anvil (:8545). Implements four of the five
-//! seams — [`NoteIndexSource`] (`eth_getLogs`, since blokli can't see Curvy events),
-//! [`RootAnchor`] (the trust anchor — **always** a direct read), [`FeeConfigSource`],
-//! [`BalanceReader`] — and a direct-submit [`TxSubmitter`] as the fallback path
+//! seams - [`NoteIndexSource`] (`eth_getLogs`, since blokli can't see Curvy events),
+//! [`RootAnchor`] (the trust anchor - **always** a direct read), [`FeeConfigSource`],
+//! [`BalanceReader`] - and a direct-submit [`TxSubmitter`] as the fallback path
 //! (plan risk 4). All contract access goes through `curvy-abi`'s bindings/decoders.
 
 use alloy::primitives::{Address, U256};
@@ -282,7 +282,7 @@ impl PortalDirectory for RpcChain {
     }
 }
 
-/// The direct-submit fallback: `eth_sendRawTransaction` + receipt (plan risk 4 — if
+/// The direct-submit fallback: `eth_sendRawTransaction` + receipt (plan risk 4 - if
 /// blokli's validator ever tightens, the SDK swaps this `TxSubmitter` in with no other
 /// change).
 #[async_trait]

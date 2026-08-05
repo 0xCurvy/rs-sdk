@@ -10,7 +10,7 @@
 //! | [`BalanceReader`]    | direct chain reads                               | nonce/gas-price/balances for tx building & asserts |
 //!
 //! Everything is `#[async_trait]`; the crypto/proving stays synchronous in the SDK
-//! (run under `spawn_blocking`). Types crossing the seam live in `curvy-types` — no
+//! (run under `spawn_blocking`). Types crossing the seam live in `curvy-types` - no
 //! alloy or reqwest type is ever named here, so `curvy-sdk` (which depends on this
 //! crate, not on any adapter) stays backend-agnostic.
 
@@ -79,7 +79,7 @@ pub trait NoteIndexSource: Send + Sync {
     /// A dense, checkpoint-pinned snapshot of the committed notes tree, when the
     /// backend can serve one.
     ///
-    /// `Ok(None)` means "fold the event log instead" — the default, and what a plain
+    /// `Ok(None)` means "fold the event log instead" - the default, and what a plain
     /// `eth_getLogs` backend must answer, since deriving leaf positions is only
     /// possible from an index that tracks the tree frontier. Preferring the snapshot
     /// removes the caller's dependence on reconstructing leaf order from event
@@ -91,11 +91,11 @@ pub trait NoteIndexSource: Send + Sync {
 }
 
 /// The trust anchor: the aggregator's on-chain notes-tree state. **Always** a direct
-/// chain read — never delegated to an indexer (mirrors the TS `rpcRootVerifier` seam).
+/// chain read - never delegated to an indexer (mirrors the TS `rpcRootVerifier` seam).
 #[async_trait]
 pub trait RootAnchor: Send + Sync {
     async fn state(&self) -> Result<AggregatorState>;
-    /// `aggregator.validNotesRoot(root)` — is this a root the aggregator will accept?
+    /// `aggregator.validNotesRoot(root)` - is this a root the aggregator will accept?
     async fn is_valid_notes_root(&self, root: &Dec) -> Result<bool>;
     /// `aggregator.noteStatus(noteId)` as its raw enum ordinal (0 UNKNOWN, 1 PENDING, 2 INCLUDED).
     async fn note_status(&self, note_id: &Dec) -> Result<u8>;

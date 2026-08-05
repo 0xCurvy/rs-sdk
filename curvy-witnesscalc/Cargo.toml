@@ -10,7 +10,7 @@ publish = false
 # CVYWIT01 evaluator); per-circuit graph/zkey artifacts pinned by sha256; the interim
 # `build_pending_commitment` input massaging (documented as the stopgap for the core
 # `to_circuit_input()` fix).
-# Depends on curvy-prover for the Groth16 leg — one crate turns (input JSON) → (proof).
+# Depends on curvy-prover for the Groth16 leg - one crate turns (input JSON) → (proof).
 
 [dependencies]
 curvy-core = { workspace = true }

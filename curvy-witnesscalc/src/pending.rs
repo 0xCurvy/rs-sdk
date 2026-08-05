@@ -18,7 +18,7 @@ use curvy_core::witness::PendingCommitmentWitness;
 use serde_json::Value;
 
 /// Turn a `PendingCommitmentWitness` into the circuit-consumable input JSON, and
-/// return `(input_json, reduced_input_hash)` — the reduced hash is also the single
+/// return `(input_json, reduced_input_hash)` - the reduced hash is also the single
 /// public signal the on-chain `commitPendingNotes` recomputes.
 pub fn to_circuit_input(w: &PendingCommitmentWitness) -> Result<(String, String)> {
     // Field-reduce the raw digest mod p (fr_from_dec reduces; fr_to_dec renders canonical).

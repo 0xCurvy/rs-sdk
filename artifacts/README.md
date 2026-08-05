@@ -15,14 +15,14 @@ deployment.
 Artifact bytes are authenticated before graph decoding or the unchecked zkey point
 parser sees them. Wrong/stale files fail closed.
 
-## `graphs/` — test fixtures only
+## `graphs/` - test fixtures only
 
 `graphs/*.graph.bin` are the iden3 `circom-witnesscalc` graphs for the three PIX
 circuits. Nothing on the production path reads them. They exist so
 `curvy-witnesscalc/tests/pix_profiles.rs` can evaluate each input through an
 independently built graph and compare the resulting assignment to the CVYWIT one,
 signal for signal. That comparison is the evidence the CVYWIT graphs are faithful, so
-the fixtures are pinned by SHA-256 too — a stale reference would make the test pass
+the fixtures are pinned by SHA-256 too - a stale reference would make the test pass
 without meaning anything.
 
 `circom-witnesscalc` is therefore a **dev-dependency only**. It needs `bindgen`/`clang`,
@@ -31,5 +31,17 @@ compiles it, only `cargo test -p curvy-witnesscalc` does.
 
 ## `cvywit/*.postcard.bin`
 
-Intermediate output of the `circom-witness-rs` generation pipeline, kept so a graph can
-be re-exported (v1 or v2) without re-running circom. Not read at runtime.
+Intermediate output of the graph pipeline, kept so a graph can be re-exported without
+re-running circom. Not read at runtime.
+
+Re-export them with `curvy-signet` in `rs-core`, which reproduces both shipped PIX
+artifacts byte-for-byte:
+
+```bash
+cargo run -p curvy-signet --release -- export \
+  artifacts/cvywit/pix-withdrawal-10-30.postcard.bin out.bin <r1cs-sha256> --ops original
+```
+
+`--ops original` is required for these two. They predate the upstream patch that
+inserts the bitwise operators, which shifted every operation index from 14 up -
+decoding them with the current schema is silent and wrong. See that crate's README.

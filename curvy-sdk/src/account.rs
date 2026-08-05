@@ -1,7 +1,7 @@
 //! Curvy accounts and the note model.
 //!
-//! An account carries the dual-curve stealth meta-keys `(k, v, K, V)` — secp256k1
-//! spend + BN254 view — **and** a BabyJubJub note-owner key. Per the TS SDK
+//! An account carries the dual-curve stealth meta-keys `(k, v, K, V)` - secp256k1
+//! spend + BN254 view - **and** a BabyJubJub note-owner key. Per the TS SDK
 //! (`getBabyJubjubPublicKey`), the note-owner key is NOT per-note: its private key IS
 //! the spend key `k`, and the public key is `derivePublicKey(k)`. Per-note
 //! unlinkability comes entirely from each note's `sharedSecret` (the stealth ECDH
@@ -16,7 +16,7 @@ use sha3::{Digest, Keccak256};
 /// A full Curvy account (holds the private spend/view keys).
 #[derive(Clone)]
 pub struct Account {
-    /// secp256k1 spend private key (hex) — also the BabyJubJub note-owner private key.
+    /// secp256k1 spend private key (hex) - also the BabyJubJub note-owner private key.
     pub k: String,
     /// BN254 view private key (hex).
     pub v: String,
@@ -53,7 +53,7 @@ impl Account {
     }
 
     /// Login from a raw EOA-style private key via a keccak KDF (the plan's
-    /// "keccak-KDF from raw private keys" — a PoC stand-in for the TS SDK's exact
+    /// "keccak-KDF from raw private keys" - a PoC stand-in for the TS SDK's exact
     /// signature-derived KDF; the shape, `get_meta(kdf(raw))`, is what matters).
     /// `k = keccak256(raw ‖ "curvy/spend/v1")`, `v = keccak256(raw ‖ "curvy/view/v1")`;
     /// `get_meta` reduces each into its curve's scalar field.
@@ -121,7 +121,7 @@ impl OwnedNote {
 }
 
 /// Parse a stealth `"x.y"` point-string into a BabyJubJub/field pair (each reduced
-/// mod the BN254 scalar field — lossless in practice for a real ephemeral `R`,
+/// mod the BN254 scalar field - lossless in practice for a real ephemeral `R`,
 /// whose coordinates are `< r` with overwhelming probability).
 pub fn parse_xy(s: &str) -> Result<(Fr, Fr)> {
     let (x, y) = s

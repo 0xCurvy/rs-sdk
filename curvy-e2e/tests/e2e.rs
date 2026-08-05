@@ -11,8 +11,8 @@ async fn deposit_aggregate_and_withdraw_pix_through_blokli() {
     assert_eq!(report.phases.len(), 13, "every phase must be recorded");
     assert!(report.delivered_wei > 0, "withdrawal delivered nothing");
 
-    // Blokli is the only backend: every seam — submission, the event index, the trust
-    // anchor, fees, balances, portal derivation — goes through it, so no transaction
+    // Blokli is the only backend: every seam - submission, the event index, the trust
+    // anchor, fees, balances, portal derivation - goes through it, so no transaction
     // may report any other backend.
     let bypassed = report
         .transactions()

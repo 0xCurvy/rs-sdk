@@ -159,7 +159,7 @@ fn real_evaluation_zkeys_prove_every_pix_flow_profile() {
 /// Production now evaluates the Curvy-owned `CVYWIT01` graphs. That is only safe if
 /// they reproduce the iden3 `circom-witnesscalc` graphs exactly: the assignment feeds
 /// Groth16 directly, so a single differing signal is a proof the deployed verifier
-/// rejects — and the two graphs are built by different toolchains from the same
+/// rejects - and the two graphs are built by different toolchains from the same
 /// circuit, which is precisely the kind of divergence nothing else would catch.
 ///
 /// `circom-witnesscalc` is a dev-dependency only, so it is the *reference* here and
@@ -194,7 +194,7 @@ fn iden3_assignment(graph_name: &str, expected_sha256: &str, input: &str) -> Vec
     assert_eq!(
         actual,
         expected_sha256,
-        "stale iden3 reference graph at {} — a wrong reference would make this \
+        "stale iden3 reference graph at {} - a wrong reference would make this \
          comparison meaningless",
         path.display()
     );
@@ -259,7 +259,7 @@ fn curvy_witness_reproduces_the_pending_assignment() {
 /// It stores one field element per *live* node rather than one per node, so the risk
 /// it carries is slot recycling: a slot freed one instruction too early yields a wrong
 /// assignment, not a crash. Only a full-assignment comparison catches that, and only
-/// on real graphs — the recycling pattern depends on the circuit's shape.
+/// on real graphs - the recycling pattern depends on the circuit's shape.
 #[test]
 fn sage_reproduces_every_bundled_profile() {
     // The three profiles this crate has input builders for; they include the largest

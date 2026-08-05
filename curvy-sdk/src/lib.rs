@@ -3,7 +3,7 @@
 //! It assembles chain-api trait objects with `curvy-abi`
 //! calldata/signing and `curvy-witnesscalc` proving to run, entirely from Rust:
 //! **shield → commit → aggregate → scan/withdraw**. All crypto is `curvy-core`; there is no
-//! second implementation, and no direct alloy/blokli/reqwest dependency here — the
+//! second implementation, and no direct alloy/blokli/reqwest dependency here - the
 //! seam is reached only through the adapter crates.
 //!
 //! Deliberately out of scope: planner, relayer +

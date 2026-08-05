@@ -1,4 +1,4 @@
-//! blokli [`TxSubmitter`] + [`NoteIndexSource`] adapter — a small reqwest GraphQL
+//! blokli [`TxSubmitter`] + [`NoteIndexSource`] adapter - a small reqwest GraphQL
 //! client against bloklid (`:8080 /graphql`). `sendTransactionSync(confirmations: 1)`
 //! is the submit path (anvil-localhost finality == 1); the union result is decoded
 //! into typed [`ChainError`]s (RpcError / validator rejections / timeouts) so the SDK
@@ -10,11 +10,11 @@
 //!
 //! 1. every `curvy*` query returns a **union** (`… on CurvyPendingNotes { notes { … } }`),
 //!    so a failure arrives as a `QueryFailed` member rather than a transport error;
-//! 2. `noteId` / `batchIndex` / `nullifier` are `Hex32`, **not** decimal — they are
+//! 2. `noteId` / `batchIndex` / `nullifier` are `Hex32`, **not** decimal - they are
 //!    converted here, because everything past this seam speaks [`Dec`] and the field
 //!    parser in `curvy-core` panics on a `0x…` string;
 //! 3. results are ordered by `(block, txIndex, logIndex, eventItemIndex)` and paged by
-//!    an exclusive `after` cursor with a hard server cap of 1000 rows per page — so a
+//!    an exclusive `after` cursor with a hard server cap of 1000 rows per page - so a
 //!    single unpaged request silently truncates a busy chain. Every read here follows
 //!    the cursor to exhaustion.
 
@@ -121,7 +121,7 @@ pub struct BlokliChain {
     confirmations: i64,
 }
 
-/// One event's canonical chain position — also the shape of the `after` cursor.
+/// One event's canonical chain position - also the shape of the `after` cursor.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Position {
     block: u64,
@@ -200,7 +200,7 @@ impl BlokliChain {
         }
     }
 
-    /// `chainInfo` — `(network, chainId)` — used by the e2e readiness ledger.
+    /// `chainInfo` - `(network, chainId)` - used by the e2e readiness ledger.
     pub async fn chain_info(&self) -> Result<(String, u64)> {
         let v = self.gql(CHAININFO_QUERY, serde_json::json!({})).await?;
         let node = &v["data"]["chainInfo"];
@@ -213,7 +213,7 @@ impl BlokliChain {
     ///
     /// Paging is the whole point: `first` is capped at 1000 server-side, so the
     /// previous single-shot query silently lost rows once a chain had seen enough
-    /// Curvy activity — and a short read of the committed-notes log yields a wrong
+    /// Curvy activity - and a short read of the committed-notes log yields a wrong
     /// tree root rather than an error.
     async fn paged_rows(
         &self,
@@ -249,7 +249,7 @@ impl BlokliChain {
                 let position = position(row)?;
                 // `to_block` bounds the caller's window; the server only takes a lower
                 // bound, so trim here. Ordering is ascending, so this page and every
-                // later one are past the window — stop.
+                // later one are past the window - stop.
                 if position.block > to_block {
                     return Ok(out);
                 }
@@ -289,7 +289,7 @@ fn push_dense_leaf(leaves: &mut Vec<Dec>, leaf_index: u64, note_id: Dec) -> Resu
 /// Resolve a Curvy union result to its success member.
 ///
 /// Every `curvy*` query returns a union whose members are the payload type plus
-/// `QueryFailedError` (and sometimes `InvalidAddressError`) — note the `Error`
+/// `QueryFailedError` (and sometimes `InvalidAddressError`) - note the `Error`
 /// suffix: the async-graphql type name is the Rust struct name, so a fragment on
 /// `QueryFailed` is an unknown type and fails validation for the whole query. The
 /// inline fragments inline the payload's fields onto this node, so callers read them
@@ -341,7 +341,7 @@ fn u64_field(value: &serde_json::Value, name: &str) -> Result<u64> {
 /// A `Hex32` field as a canonical decimal [`Dec`].
 ///
 /// Everything past this seam treats field elements as decimal strings, and
-/// `curvy-core`'s parser *panics* on anything else — so a `0x…` value must never
+/// `curvy-core`'s parser *panics* on anything else - so a `0x…` value must never
 /// escape the adapter.
 fn hex32_field(value: &serde_json::Value, name: &str) -> Result<Dec> {
     let raw = string_field(value, name)?;
@@ -527,7 +527,7 @@ impl NoteIndexSource for BlokliChain {
 
     async fn notes_tree_snapshot(&self) -> Result<Option<NotesTreeSnapshot>> {
         // No checkpoint yet is the normal state of a chain that has never committed a
-        // batch, not an error — report it as "unavailable" so the caller folds the
+        // batch, not an error - report it as "unavailable" so the caller folds the
         // event log instead. Both paths reconcile against the chain root afterwards.
         let response = self
             .gql(SYNC_CHECKPOINT_QUERY, serde_json::json!({}))

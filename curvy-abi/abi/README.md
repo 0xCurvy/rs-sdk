@@ -1,4 +1,4 @@
-# Vendored contract ABIs — provenance
+# Vendored contract ABIs - provenance
 
 These four `*.abi.json` files are the `.abi` arrays extracted verbatim from the
 compiled artifacts in the **read-only** `v3-pix-circuits` checkout, so the SDK never

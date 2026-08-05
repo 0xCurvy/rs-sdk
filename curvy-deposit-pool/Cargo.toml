@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 # The HOPR integration seam: implements `hopr_api::chain::DepositPool` over CurvyClient.
-# Kept OUT of curvy-sdk on purpose — curvy-sdk must not name a consumer any more than it
+# Kept OUT of curvy-sdk on purpose - curvy-sdk must not name a consumer any more than it
 # names a backend.
 
 [dependencies]

@@ -6,7 +6,7 @@
 //! ## Why CVYWIT and not iden3 `circom-witnesscalc`
 //! Both evaluate the same circuit to the same assignment; `tests/pix_profiles.rs`
 //! asserts that signal for signal. `curvy-witness` is preferred because it is ours,
-//! it validates every graph reference before evaluating, and it is pure Rust — the
+//! it validates every graph reference before evaluating, and it is pure Rust - the
 //! iden3 crate pulls in a `bindgen`/`clang` build requirement that broke the Nix and
 //! bare-Linux setups this SDK has to run on. It survives as a dev-dependency purely
 //! so the cross-evaluator equivalence gate can still be run.
@@ -42,7 +42,7 @@ pub struct GraphWitnessCalculator {
 
 impl GraphWitnessCalculator {
     /// Authenticate and parse one graph. `WitnessGraph::from_bytes` hashes the
-    /// complete artifact before decoding anything, so this is the pin check — there
+    /// complete artifact before decoding anything, so this is the pin check - there
     /// is deliberately no second pass over the same bytes.
     pub fn from_graph_bytes(bytes: &[u8], expected_sha256: &str) -> Result<Self> {
         Ok(Self {
@@ -173,7 +173,7 @@ impl Circuit {
     }
 
     /// The pinned graph digest. Exposed so a consumer can authenticate the artifact
-    /// itself — the SDK re-exports this crate precisely for that.
+    /// itself - the SDK re-exports this crate precisely for that.
     pub fn graph_sha256(&self) -> &'static str {
         self.graph_sha256
     }
@@ -203,7 +203,7 @@ impl Circuit {
         let got = sha256_hex(&bytes);
         if got != expected {
             bail!(
-                "{}: {what} sha256 mismatch at {}: got {got}, expected {expected} — wrong/stale artifact",
+                "{}: {what} sha256 mismatch at {}: got {got}, expected {expected} - wrong/stale artifact",
                 self.key,
                 path.display()
             );
@@ -245,7 +245,7 @@ impl Circuit {
         })?;
         GraphWitnessCalculator::from_graph_bytes(&bytes, self.graph_sha256).with_context(|| {
             format!(
-                "{}: load graph {} — wrong/stale artifact",
+                "{}: load graph {} - wrong/stale artifact",
                 self.key,
                 path.display()
             )

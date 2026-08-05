@@ -46,7 +46,7 @@ const RELAYER_SEED: &str = "0x55555555555555555555555555555555555555555555555555
 /// into `feeNotePublicKey`.
 ///
 /// The fee note is a stealth note, so a non-zero protocol fee can only be made
-/// collectable by sealing it to this identity — the aggregator publishes the owner key
+/// collectable by sealing it to this identity - the aggregator publishes the owner key
 /// but there is no on-chain channel for the collector's `S`/`V`. These are the
 /// well-known localnet dev secrets and must never appear outside a local chain.
 const FEE_COLLECTOR_SPEND_PRIV: &str =
@@ -92,7 +92,7 @@ impl E2eReport {
         self.phases.iter().flat_map(|phase| phase.ledger.iter())
     }
 
-    /// A human-readable summary — this is what a reviewer reads to decide the run
+    /// A human-readable summary - this is what a reviewer reads to decide the run
     /// actually exercised Blokli rather than quietly falling back to direct RPC.
     pub fn summary(&self) -> String {
         use std::fmt::Write;
@@ -157,7 +157,7 @@ impl Recorder {
             ledger,
         };
         println!(
-            "[{}/13] PASS {} ({:.1}s) — {}",
+            "[{}/13] PASS {} ({:.1}s) - {}",
             self.phases.len() + 1,
             outcome.name,
             outcome.elapsed.as_secs_f64(),
@@ -213,7 +213,7 @@ fn blokli_url() -> String {
 /// The ten allocation notes are sealed to *explicitly known* BabyJubJub owners, so
 /// nothing about them is random: `ownerHash`, `noteId` and `nullifier` are pure
 /// functions of `(owner point, shared secret, amount, token)`. With a fixed shared
-/// secret every run would replay the same note ids into the same aggregator — the
+/// secret every run would replay the same note ids into the same aggregator - the
 /// second run reverts on already-committed notes and already-spent nullifiers. The
 /// salt makes each run's commitments unique so the flow is re-runnable against a
 /// long-lived stack. Set `CURVY_E2E_SALT` to replay a specific run while debugging
@@ -324,7 +324,7 @@ pub async fn run() -> Result<E2eReport> {
         bail!("unexpected chain id {chain_id}; expected 31337");
     }
     // Every seam is blokli: submission, the event index, the trust anchor, fees,
-    // balances and portal derivation. Nothing here opens a direct RPC connection —
+    // balances and portal derivation. Nothing here opens a direct RPC connection -
     // blokli's `curvy*` resolvers still perform real `eth_call`s, so the aggregator
     // state remains a chain read rather than indexed state; it is merely proxied.
     let client = Arc::new(CurvyClient::new(
@@ -418,7 +418,7 @@ pub async fn run() -> Result<E2eReport> {
         bail!("first PIX aggregation did not emit the relayer note");
     }
     record.finish(
-        "aggregate (2,9) — 7 allocations",
+        "aggregate (2,9) - 7 allocations",
         format!("1 input → {FIRST_FANOUT} allocations + change + relayer + fee"),
         first.ledger.clone(),
     );
@@ -436,7 +436,7 @@ pub async fn run() -> Result<E2eReport> {
         .iter()
         .find(|note| amount(&note.amount).is_ok_and(|value| value == RELAYER_REIMBURSEMENT_WEI))
         .context(
-            "relayer could not discover its gas-reimbursement note — a real paymaster \
+            "relayer could not discover its gas-reimbursement note - a real paymaster \
              would reject this aggregation as having no operator note",
         )?;
     record.finish(
@@ -470,7 +470,7 @@ pub async fn run() -> Result<E2eReport> {
         bail!("second PIX aggregation did not emit ten notes through Blokli");
     }
     record.finish(
-        "aggregate (2,9) — 3 allocations",
+        "aggregate (2,9) - 3 allocations",
         format!(
             "committed change → {} allocations + change + relayer + padded fan-out",
             second_allocations.len()
@@ -529,7 +529,7 @@ pub async fn run() -> Result<E2eReport> {
         bail!("withdrawal did not deduct the configured fee/gas");
     }
     record.finish(
-        "withdraw (10) — 10 owners",
+        "withdraw (10) - 10 owners",
         format!("{delivered} wei to {DESTINATION}, balance delta matches"),
         withdrawal_ledger,
     );
@@ -562,7 +562,7 @@ pub async fn run() -> Result<E2eReport> {
 }
 
 /// Number of PIX deposit addresses the pool phase serves. Below the seven-allocation
-/// batch limit so the flush is driven explicitly rather than by hitting the threshold —
+/// batch limit so the flush is driven explicitly rather than by hitting the threshold -
 /// the interesting case, since a partial batch is what a real node usually holds.
 const POOL_DEPOSIT_COUNT: usize = 4;
 /// Value allocated to each pool deposit address.
@@ -704,7 +704,7 @@ mod tests {
 
     /// The circuit constrains the fee note's owner to the aggregator's
     /// `feeNotePublicKey`, so the collector identity the flow seals to must derive
-    /// exactly that key — otherwise every aggregation fails at proving time with an
+    /// exactly that key - otherwise every aggregation fails at proving time with an
     /// unsatisfiable constraint rather than anything that names the cause.
     #[test]
     fn the_fee_collector_identity_owns_the_dev_fee_note_public_key() {

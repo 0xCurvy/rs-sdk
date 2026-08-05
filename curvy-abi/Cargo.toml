@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# L3 — alloy `sol!` bindings for the deployed Curvy contracts (generated at compile
+# L3 - alloy `sol!` bindings for the deployed Curvy contracts (generated at compile
 # time from the ABI JSONs VENDORED under abi/, so the circuits repo is not read at runtime),
 # plus the calldata encoders, local raw-tx signer, snarkjs→on-chain proof transform
 # (the G2 coordinate swap), and event decoders. This is the only crate the SDK uses
