@@ -1,0 +1,14 @@
+[package]
+name = "curvy-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# L1 — pure neutral domain types crossing the trait seams (curvy-chain-api). No IO,
+# no alloy, no blokli. Field elements / uint256s ride as decimal strings (the same
+# boundary curvy-core speaks), addresses as "0x…" hex — so curvy-sdk can consume the
+# seam without ever naming a backend type.
+
+[dependencies]
+serde = { workspace = true }

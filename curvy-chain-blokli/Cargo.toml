@@ -1,0 +1,19 @@
+[package]
+name = "curvy-chain-blokli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# L4 — the blokli TxSubmitter adapter. A ~1-file reqwest GraphQL client against
+# bloklid :8080 `sendTransactionSync(conf=1)` (ported/hardened from blokli-smoke),
+# with clean typed errors for the union results (RpcError / validator rejections).
+
+[dependencies]
+curvy-chain-api = { path = "../curvy-chain-api" }
+curvy-types = { path = "../curvy-types" }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+# Hex32 note ids / batch indices are converted to the decimal Dec the seam speaks.
+num-bigint = { workspace = true }

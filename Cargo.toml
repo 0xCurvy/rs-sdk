@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "curvy-types",
+    "curvy-chain-api",
+    "curvy-abi",
+    "curvy-witnesscalc",
+    "curvy-chain-blokli",
+    "curvy-chain-rpc",
+    "curvy-sdk",
+    "curvy-e2e",
+    "curvy-deposit-pool",
+]
+
+# Detached workspace: the SDK consumes the standalone rs-core crates and does
+# not duplicate their cryptography or Groth16 implementation.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.94"
+
+[workspace.dependencies]
+curvy-core = { path = "../rs-core/crates/core" }
+curvy-prover = { path = "../rs-core/crates/prover" }
+curvy-witness = { path = "../rs-core/crates/witness" }
+
+# Must match rs-core because Fr values cross the boundary.
+ark-bn254 = { version = "=0.6.0", features = ["std"] }
+ark-ff = { version = "=0.6.0", features = ["std"] }
+
+# EVM adapter layer only (curvy-abi / curvy-chain-rpc / curvy-chain-blokli).
+alloy = { version = "1", features = ["full"] }
+# GraphQL/HTTP to bloklid :8080.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+hex = "0.4"
+num-bigint = "=0.5.1"
+sha3 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

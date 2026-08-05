@@ -1,0 +1,27 @@
+[package]
+name = "curvy-deposit-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The HOPR integration seam: implements `hopr_api::chain::DepositPool` over CurvyClient.
+# Kept OUT of curvy-sdk on purpose — curvy-sdk must not name a consumer any more than it
+# names a backend.
+
+[dependencies]
+curvy-sdk = { path = "../curvy-sdk" }
+curvy-core = { workspace = true }
+hopr-api = { version = "1.18.0", features = ["chain", "types-chain"] }
+hopr-types = { version = "2.1.1", features = ["crypto"] }
+babyjubjub-ec = { version = "0.4.0", features = ["arithmetic"] }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+futures = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = "0.1"
+getrandom = "0.3"
+num-bigint = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
