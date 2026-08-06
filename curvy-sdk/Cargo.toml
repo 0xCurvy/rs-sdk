@@ -5,11 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# L5 - the thin CurvyClient facade for the e2e: accounts (keccak-KDF login), note
-# build/send via curvy-core stealth, and the shield→commit→aggregate→scan
-# orchestration over the L2 trait objects + curvy-abi calldata/signing +
-# curvy-witnesscalc proving. Minimal in-memory storage. NO direct alloy/blokli/reqwest
-# dependency - the seam is real, reached only through the adapter crates.
+# Client orchestration over chain and proving adapters.
 
 [dependencies]
 curvy-core = { workspace = true }
@@ -25,3 +21,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 hex = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }

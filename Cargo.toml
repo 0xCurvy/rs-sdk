@@ -12,9 +12,6 @@ members = [
     "curvy-deposit-pool",
 ]
 
-# Detached workspace: the SDK consumes the standalone rs-core crates and does
-# not duplicate their cryptography or Groth16 implementation.
-
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -23,16 +20,29 @@ publish = false
 rust-version = "1.94"
 
 [workspace.dependencies]
-curvy-core = { path = "../rs-core/crates/core" }
-curvy-prover = { path = "../rs-core/crates/prover" }
-curvy-witness = { path = "../rs-core/crates/witness" }
+# Exact versions keep artifact evaluation reproducible.
+curvy-core = "=0.1.0-rc.3"
+curvy-prover = "=0.1.0-rc.3"
+curvy-witness = "=0.1.0-rc.3"
 
-# Must match rs-core because Fr values cross the boundary.
+# Field values cross the crate boundary.
 ark-bn254 = { version = "=0.6.0", features = ["std"] }
 ark-ff = { version = "=0.6.0", features = ["std"] }
 
-# EVM adapter layer only (curvy-abi / curvy-chain-rpc / curvy-chain-blokli).
-alloy = { version = "1", features = ["full"] }
+# EVM adapters use HTTP without TLS or WebSocket support.
+alloy = { version = "1", default-features = false, features = [
+    "consensus",
+    "contract",
+    "eips",
+    "json",
+    "network",
+    "providers",
+    "reqwest",
+    "rpc-types",
+    "signer-local",
+    "sol-types",
+    "std",
+] }
 # GraphQL/HTTP to bloklid :8080.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 

@@ -1,8 +1,4 @@
-//! Input assembly for the additive PIX circuit profiles.
-//!
-//! `rs-core` owns every cryptographic primitive used here. This module only
-//! supplies the circuit-version-specific, fixed-arity transcript and flattened
-//! signal layout from `v3-pix-circuits`.
+//! Fixed-arity aggregation and multi-owner withdrawal inputs.
 
 use num_bigint::BigUint;
 use serde::Serialize;
@@ -116,7 +112,7 @@ pub struct PixAggregationWitness {
     pub fee_note_public_key: [String; 2],
 }
 
-/// Build the fixed two-input, nine-regular-output PIX aggregation witness.
+/// Build the fixed two-input, nine-output aggregation witness.
 #[allow(clippy::too_many_arguments)]
 pub fn build_pix_aggregation_with_signer(
     input_notes: &[Note],
@@ -212,7 +208,7 @@ pub struct PixMultiOwnerWithdrawalWitness {
     pub token_id: String,
 }
 
-/// Build the fixed ten-slot, independently-owned PIX withdrawal witness.
+/// Build the fixed ten-slot multi-owner withdrawal witness.
 pub fn build_pix_multi_owner_withdrawal(
     notes: &[Note],
     signers: &[&dyn NoteSigner],

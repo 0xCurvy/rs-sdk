@@ -1,16 +1,12 @@
 //! Curvy accounts and the note model.
 //!
-//! An account carries the dual-curve stealth meta-keys `(k, v, K, V)` - secp256k1
-//! spend + BN254 view - **and** a BabyJubJub note-owner key. Per the TS SDK
-//! (`getBabyJubjubPublicKey`), the note-owner key is NOT per-note: its private key IS
-//! the spend key `k`, and the public key is `derivePublicKey(k)`. Per-note
-//! unlinkability comes entirely from each note's `sharedSecret` (the stealth ECDH
-//! x-coordinate), mixed into `ownerHash`.
+//! Accounts contain stealth spend/view keys and a BabyJubJub note-owner key.
 
 use anyhow::{Context, Result};
 use curvy_core::eddsa::pub_from_private_key_hex;
-use curvy_core::field::{Fr, fr_from_dec};
+use curvy_core::field::{Fr, fr_from_biguint, fr_to_biguint};
 use curvy_core::stealth;
+use num_bigint::BigUint;
 use sha3::{Digest, Keccak256};
 
 /// A full Curvy account (holds the private spend/view keys).
@@ -52,12 +48,41 @@ impl Account {
         })
     }
 
-    /// Login from a raw EOA-style private key via a keccak KDF (the plan's
-    /// "keccak-KDF from raw private keys" - a PoC stand-in for the TS SDK's exact
-    /// signature-derived KDF; the shape, `get_meta(kdf(raw))`, is what matters).
+    /// Derive an account from EVM signature components in decimal or hexadecimal.
+    ///
+    /// The spend key hashes `[s, r]`; the view key hashes `[r, s]`. Each digest is
+    /// restricted to 252 bits.
+    pub fn from_signature_components(r_decimal: &str, s_decimal: &str) -> Result<Self> {
+        let r = parse_signature_component(r_decimal).context("parse EVM signature r")?;
+        let s = parse_signature_component(s_decimal).context("parse EVM signature s")?;
+        let hash_pair = |left: &BigUint, right: &BigUint| -> String {
+            let mut preimage = even_length_bytes(left);
+            preimage.extend(even_length_bytes(right));
+            let digest = hex::encode(Keccak256::digest(preimage));
+            format!("0{}", &digest[1..])
+        };
+        let spend = hash_pair(&s, &r);
+        let view = hash_pair(&r, &s);
+        let minimum = BigUint::from(10u8).pow(70);
+        anyhow::ensure!(
+            BigUint::parse_bytes(spend.as_bytes(), 16).is_some_and(|value| value >= minimum),
+            "EVM signature derives a spend key below the validity bound"
+        );
+        anyhow::ensure!(
+            BigUint::parse_bytes(view.as_bytes(), 16).is_some_and(|value| value >= minimum),
+            "EVM signature derives a view key below the validity bound"
+        );
+        anyhow::ensure!(
+            spend != view,
+            "EVM signature derives identical spend and view keys"
+        );
+        Self::from_meta_keys(&spend, &view)
+    }
+
+    /// Derive an account using the legacy raw-key KDF.
     /// `k = keccak256(raw ‖ "curvy/spend/v1")`, `v = keccak256(raw ‖ "curvy/view/v1")`;
     /// `get_meta` reduces each into its curve's scalar field.
-    pub fn from_raw_private_key(raw_hex: &str) -> Result<Self> {
+    pub fn from_poc_raw_private_key(raw_hex: &str) -> Result<Self> {
         let raw =
             hex::decode(raw_hex.trim_start_matches("0x")).context("decode raw private key")?;
         let derive = |label: &[u8]| -> String {
@@ -67,6 +92,11 @@ impl Account {
             hex::encode(h.finalize())
         };
         Self::from_meta_keys(&derive(b"curvy/spend/v1"), &derive(b"curvy/view/v1"))
+    }
+
+    #[deprecated(note = "legacy raw-key derivation; use from_signature_components")]
+    pub fn from_raw_private_key(raw_hex: &str) -> Result<Self> {
+        Self::from_poc_raw_private_key(raw_hex)
     }
 
     pub fn identity(&self) -> Identity {
@@ -84,6 +114,33 @@ impl Account {
             curvy_core::field::fr_to_dec(&self.bjj_pub.1),
         ]
     }
+}
+
+/// Encode a bigint as minimal big-endian bytes.
+fn even_length_bytes(value: &BigUint) -> Vec<u8> {
+    let bytes = value.to_bytes_be();
+    if bytes.is_empty() { vec![0] } else { bytes }
+}
+
+fn parse_signature_component(value: &str) -> Result<BigUint> {
+    let (digits, radix) = value
+        .strip_prefix("0x")
+        .map_or((value, 10), |digits| (digits, 16));
+    BigUint::parse_bytes(digits.as_bytes(), radix)
+        .ok_or_else(|| anyhow::anyhow!("invalid signature component"))
+}
+
+/// Parse an external decimal field element without the panic-and-reduce behaviour of
+/// `curvy_core::field::fr_from_dec`.
+pub(crate) fn parse_fr_decimal(value: &str, name: &str) -> Result<Fr> {
+    let parsed = BigUint::parse_bytes(value.as_bytes(), 10)
+        .with_context(|| format!("{name} is not a non-negative decimal integer: {value:?}"))?;
+    let field = fr_from_biguint(&parsed);
+    anyhow::ensure!(
+        fr_to_biguint(&field) == parsed,
+        "{name} is outside the BN254 scalar field: {value}"
+    );
+    Ok(field)
 }
 
 /// A note this SDK owns/represents. Mirrors `curvy_core::witness::Note` but keeps
@@ -120,12 +177,59 @@ impl OwnedNote {
     }
 }
 
-/// Parse a stealth `"x.y"` point-string into a BabyJubJub/field pair (each reduced
-/// mod the BN254 scalar field - lossless in practice for a real ephemeral `R`,
-/// whose coordinates are `< r` with overwhelming probability).
+/// Parse a stealth `"x.y"` point-string into a canonical BN254 field pair.
 pub fn parse_xy(s: &str) -> Result<(Fr, Fr)> {
     let (x, y) = s
         .split_once('.')
         .with_context(|| format!("point not \"x.y\": {s:?}"))?;
-    Ok((fr_from_dec(x), fr_from_dec(y)))
+    Ok((
+        parse_fr_decimal(x, "point x")?,
+        parse_fr_decimal(y, "point y")?,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_components_match_the_typescript_sdk_fixture() {
+        let account = Account::from_signature_components("1", "2").unwrap();
+        assert_eq!(
+            account.k,
+            "014a3fe82a0219fcc31abd15617966a125f12b0fd3409105fc83b487a9d82de4"
+        );
+        assert_eq!(
+            account.v,
+            "02ae6da6b482f9b1b19b0b897c3fd43884180a1c5ee361e1107a1bc635649dda"
+        );
+    }
+
+    #[test]
+    fn signature_components_accept_viem_hex_values() {
+        let account = Account::from_signature_components("0x01", "0x02").unwrap();
+        assert_eq!(
+            account.k,
+            "014a3fe82a0219fcc31abd15617966a125f12b0fd3409105fc83b487a9d82de4"
+        );
+    }
+
+    #[test]
+    fn equal_signature_components_are_rejected() {
+        let error = Account::from_signature_components("5", "5")
+            .err()
+            .expect("equal components must be rejected");
+        assert!(error.to_string().contains("identical"));
+    }
+
+    #[test]
+    fn external_field_values_are_checked_not_reduced_or_panicked() {
+        let modulus = fr_to_biguint(&-Fr::from(1u64)) + 1u64;
+        assert!(parse_fr_decimal("not-a-number", "fixture").is_err());
+        assert!(parse_fr_decimal(&modulus.to_string(), "fixture").is_err());
+        assert_eq!(
+            parse_fr_decimal(&(&modulus - 1u64).to_string(), "fixture").unwrap(),
+            -Fr::from(1u64)
+        );
+    }
 }

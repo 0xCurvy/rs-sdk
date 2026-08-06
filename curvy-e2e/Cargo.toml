@@ -5,9 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# L6-ish consumer - the runnable end-to-end against the live blokli-env stack.
-# Assembles the adapter mix behind the CurvyClient and drives deposit → commit →
-# aggregate(via blokli) → scan, printing a per-step PASS/FAIL ledger.
+# Live acceptance flow through Blokli.
 
 [[bin]]
 name = "curvy-e2e"

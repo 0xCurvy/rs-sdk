@@ -1,14 +1,13 @@
-//! `CurvyClient` - the thin facade that drives deposit → commit → PIX aggregation → scan
-//! over the L2 trait objects, `curvy-abi` calldata/signing, and `curvy-witnesscalc`
-//! proving. All crypto/proving runs under `spawn_blocking` so tokio is never blocked.
-//! Minimal in-memory storage (the mirrored global IMT leaf log).
+//! Curvy transaction orchestration and local note-tree synchronization.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use curvy_core::cipher::decrypt_amount_token;
 use curvy_core::eddsa::ScalarSigningKey;
-use curvy_core::field::{Fr, fr_from_biguint, fr_from_dec, fr_to_biguint, fr_to_dec};
+use curvy_core::field::{Fr, fr_from_biguint, fr_to_biguint, fr_to_dec};
 use curvy_core::imt::Imt;
 use curvy_core::note::{note_id, owner_hash};
 use curvy_core::stealth;
@@ -19,12 +18,14 @@ use curvy_core::witness::{
 use curvy_types::{FeeConfig, OnchainNote, TxOutcome};
 use curvy_witnesscalc::pix::{build_pix_aggregation_with_signer, build_pix_multi_owner_withdrawal};
 use num_bigint::BigUint;
+use sha3::{Digest, Keccak256};
 
 use curvy_chain_api::{
-    BalanceReader, FeeConfigSource, NoteIndexSource, PortalDirectory, RootAnchor, TxSubmitter,
+    BalanceReader, ChainError, FeeConfigSource, NoteIndexSource, PortalDirectory, RootAnchor,
+    TxSubmitter,
 };
 
-use crate::account::{Account, Identity, OwnedNote};
+use crate::account::{Account, Identity, OwnedNote, parse_fr_decimal, parse_xy};
 use crate::send::{fee_note, seal_known_owner, seal_note, shield_net_amount, zero_pad_note};
 
 const TREE_DEPTH: usize = 30;
@@ -35,10 +36,7 @@ const PIX_AGGREGATION_MAX_INPUTS: u64 = 2;
 const PIX_AGGREGATION_MAX_OUTPUTS: u64 = 9;
 const PIX_WITHDRAWAL_MAX_INPUTS: u64 = 10;
 
-// ── fee-table accessors ────────────────────────────────────────────────────────
-// A fee the chain reports but the SDK cannot parse must NOT silently become 0: the
-// value math would then build a note whose amount the aggregator never agrees with,
-// and the flow fails much later as an unrelated "noteId not found".
+// Fee accessors.
 
 /// The per-token `pendingNoteCommitment` gas fee. Tokens absent from the table are
 /// `0` (see [`FeeConfig::gas_fee_for`]); a malformed entry is an error.
@@ -107,9 +105,100 @@ pub struct TxLedger {
     pub tx_hash: String,
 }
 
-/// Result of one PIX fan-out proof. `emitted_notes` is the complete on-chain
-/// order: nine regular outputs followed by the fee note. Commit all ten before
-/// spending the change or any allocation.
+/// A prepared shield deposit. Persist it before funding the portal.
+#[derive(Clone, Debug)]
+pub struct PreparedDeposit {
+    pub note: OwnedNote,
+    pub onchain_note: OnchainNote,
+    pub portal_address: String,
+    pub gross: u128,
+    pub recovery: String,
+}
+
+impl PreparedDeposit {
+    /// Rebuild a prepared deposit from its durable recovery record.
+    pub fn from_recovery_parts(
+        note: OwnedNote,
+        gross: u128,
+        recovery: String,
+        portal_address: String,
+    ) -> Self {
+        let onchain_note = OnchainNote {
+            owner_hash: fr_to_dec(&note.owner_hash()),
+            token: fr_to_dec(&note.token),
+            amount: gross.to_string(),
+            ephemeral_key: [
+                fr_to_dec(&note.ephemeral_key.0),
+                fr_to_dec(&note.ephemeral_key.1),
+            ],
+            view_tag: note.view_tag as u64,
+        };
+        Self {
+            note,
+            onchain_note,
+            portal_address,
+            gross,
+            recovery,
+        }
+    }
+}
+
+/// A submission whose final outcome is unknown.
+#[derive(Debug)]
+pub struct AmbiguousSubmission {
+    pub ledger: TxLedger,
+    source: ChainError,
+}
+
+impl fmt::Display for AmbiguousSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} submission outcome is unknown (tx {}): {}",
+            self.ledger.label, self.ledger.tx_hash, self.source
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousSubmission {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Recover the locally-known transaction identity from an ambiguous submission.
+pub fn ambiguous_submission(error: &anyhow::Error) -> Option<&AmbiguousSubmission> {
+    error.downcast_ref::<AmbiguousSubmission>()
+}
+
+/// An ambiguous aggregation with the outputs required for reconciliation.
+#[derive(Debug)]
+pub struct AmbiguousPixAggregation {
+    pub result: PixAggregationResult,
+    source: anyhow::Error,
+}
+
+impl fmt::Display for AmbiguousPixAggregation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "PIX aggregation outcome is unknown: {}",
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousPixAggregation {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub fn ambiguous_pix_aggregation(error: &anyhow::Error) -> Option<&AmbiguousPixAggregation> {
+    error.downcast_ref::<AmbiguousPixAggregation>()
+}
+
+/// Aggregation result with every emitted note in on-chain order.
 #[derive(Clone, Debug)]
 pub struct PixAggregationResult {
     pub allocations: Vec<OwnedNote>,
@@ -122,12 +211,11 @@ pub struct PixAggregationResult {
 
 #[derive(Default)]
 struct Storage {
-    /// The committed global-IMT leaf log (note ids in insertion order) - mirrors chain.
+    /// Committed note ids in leaf order.
     tree_leaves: Vec<Fr>,
 }
 
-/// The injected adapter mix. Kept as separate `Arc<dyn …>` so the seam is real: the
-/// same `RpcChain` can back several of these, but the client only ever sees traits.
+/// Chain adapters used by the client.
 pub struct CurvyClient {
     pub blokli: Arc<dyn TxSubmitter>,
     pub direct: Arc<dyn TxSubmitter>,
@@ -140,6 +228,8 @@ pub struct CurvyClient {
     pub portal_factory: String,
     pub chain_id: u64,
     storage: Mutex<Storage>,
+    /// Per-signer transaction locks.
+    nonce_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl CurvyClient {
@@ -168,12 +258,21 @@ impl CurvyClient {
             portal_factory,
             chain_id,
             storage: Mutex::new(Storage::default()),
+            nonce_locks: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
     /// The aggregator's live tree state (trust anchor), as an anyhow result.
     pub async fn anchor_state(&self) -> Result<curvy_types::AggregatorState> {
         self.anchor.state().await.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Direct `noteStatus` read for durable orchestration/recovery layers.
+    pub async fn note_status(&self, note_id: &Fr) -> Result<u8> {
+        self.anchor
+            .note_status(&fr_to_dec(note_id))
+            .await
+            .map_err(anyhow::Error::new)
     }
 
     /// An EOA's native balance in wei (for end-of-flow asserts).
@@ -193,8 +292,51 @@ impl CurvyClient {
         }
     }
 
-    /// Build, locally sign, and submit a call. Nonce/gas-price read via `BalanceReader`;
-    /// signing in `curvy-abi` (no alloy here). Returns the outcome + a ledger row.
+    /// Resolve submission ambiguity from note statuses.
+    async fn wait_for_note_statuses(&self, note_ids: &[Fr], accepted: &[u8]) -> bool {
+        for _ in 0..20 {
+            let mut all_match = true;
+            for note_id in note_ids {
+                match self.anchor.note_status(&fr_to_dec(note_id)).await {
+                    Ok(status) if accepted.contains(&status) => {}
+                    _ => {
+                        all_match = false;
+                        break;
+                    }
+                }
+            }
+            if all_match {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        false
+    }
+
+    /// Resolve an ambiguous withdrawal response from committed nullifier events.
+    async fn wait_for_nullifiers(&self, nullifiers: &[Fr]) -> bool {
+        for _ in 0..20 {
+            if self.nullifiers_committed(nullifiers).await.unwrap_or(false) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        false
+    }
+
+    /// Whether every supplied nullifier is present in the committed event history.
+    pub async fn nullifiers_committed(&self, nullifiers: &[Fr]) -> Result<bool> {
+        let wanted = nullifiers.iter().map(fr_to_dec).collect::<Vec<_>>();
+        let head = self.notes.head_block().await?;
+        let events = self.notes.committed_nullifiers(0, head).await?;
+        Ok(wanted.iter().all(|nullifier| {
+            events
+                .iter()
+                .any(|event| event.nullifiers.contains(nullifier))
+        }))
+    }
+
+    /// Build, sign and submit a call.
     #[allow(clippy::too_many_arguments)]
     async fn submit_call(
         &self,
@@ -207,8 +349,22 @@ impl CurvyClient {
         label: &str,
     ) -> Result<(TxOutcome, TxLedger)> {
         let signer_addr = curvy_abi::address_of(signer_priv)?;
+        let nonce_lock = {
+            let mut locks = self.nonce_locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(signer_addr.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _nonce_guard = nonce_lock.lock().await;
         let nonce = self.balances.tx_count(&signer_addr).await?;
-        let gas_price = self.balances.gas_price().await?.saturating_mul(2);
+        let gas_price = self
+            .balances
+            .gas_price()
+            .await?
+            .checked_mul(2)
+            .context("doubled gas price overflows u128")?;
         let raw = curvy_abi::sign_call_tx(curvy_abi::CallTx {
             signer_private_key: signer_priv,
             to,
@@ -220,52 +376,59 @@ impl CurvyClient {
             chain_id: self.chain_id,
         })?;
         let sub = self.submitter(route);
-        let outcome = sub
-            .submit(&raw)
-            .await
-            .with_context(|| format!("{label} submit"))?;
-        if !outcome.status {
-            bail!("{label}: tx {} reverted", outcome.tx_hash);
-        }
         let ledger = TxLedger {
             label: label.to_string(),
             backend: sub.backend().to_string(),
-            tx_hash: outcome.tx_hash.clone(),
+            tx_hash: format!("0x{}", hex::encode(Keccak256::digest(&raw.0))),
         };
+        let outcome = match sub.submit(&raw).await {
+            Ok(outcome) => outcome,
+            Err(
+                source @ (ChainError::Transport(_)
+                | ChainError::Ambiguous(_)
+                | ChainError::Decode(_)),
+            ) => {
+                return Err(AmbiguousSubmission { ledger, source }.into());
+            }
+            Err(error) => return Err(anyhow::Error::new(error).context(format!("{label} submit"))),
+        };
+        if !outcome.tx_hash.eq_ignore_ascii_case(&ledger.tx_hash) {
+            return Err(AmbiguousSubmission {
+                source: ChainError::Decode(format!(
+                    "backend returned tx hash {} for locally signed {}",
+                    outcome.tx_hash, ledger.tx_hash
+                )),
+                ledger,
+            }
+            .into());
+        }
+        if !outcome.status {
+            bail!("{label}: tx {} reverted", outcome.tx_hash);
+        }
         Ok((outcome, ledger))
     }
 
-    // ── Deposit ─────────────────────────────────────────────────────────────────
+    // Deposit.
 
-    /// Enter the pool by funding the deterministic entry portal and asking the
-    /// factory to deploy and shield it. Plain ETH portal funding can use direct
-    /// RPC while the protocol call is independently submitted through Blokli.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn deposit(
+    /// Fix the shield note and portal address without sending a transaction.
+    pub async fn prepare_deposit(
         &self,
         recipient: &Account,
         gross: u128,
         token: u64,
-        operator_priv: &str,
         recovery: &str,
-        funding_route: Route,
-        protocol_route: Route,
-    ) -> Result<(OwnedNote, Vec<TxLedger>)> {
+    ) -> Result<PreparedDeposit> {
         let fees = self.fees.fees().await?;
         let token_fr = Fr::from(token);
         let token_dec = token.to_string();
-
-        // Seal a note to the recipient (ownerHash depends only on owner+sharedSecret,
-        // not amount - so the gross here does not affect it).
         let sealed = seal_note(&recipient.identity(), u128_fr(gross), token_fr)?;
         let owner_hash_dec = fr_to_dec(&sealed.owner_hash());
-
         let portal_deployment = fees
             .per_token_gas_fees
             .iter()
-            .find(|g| g.token_id == token_dec)
-            .map(|g| {
-                g.portal_deployment.parse::<u128>().with_context(|| {
+            .find(|fees| fees.token_id == token_dec)
+            .map(|fees| {
+                fees.portal_deployment.parse::<u128>().with_context(|| {
                     format!("parse portalDeployment gas fee for token {token_dec}")
                 })
             })
@@ -277,9 +440,8 @@ impl CurvyClient {
             fees.deposit_fee_bps,
             portal_deployment,
             pending_commit,
-        );
-
-        let onchain = OnchainNote {
+        )?;
+        let onchain_note = OnchainNote {
             owner_hash: owner_hash_dec.clone(),
             token: token_dec,
             amount: gross.to_string(),
@@ -289,70 +451,132 @@ impl CurvyClient {
             ],
             view_tag: sealed.view_tag as u64,
         };
-
-        // Pre-fund the predicted entry-portal address with the gross ETH.
-        let portal_addr = self
+        let portal_address = self
             .portals
             .entry_portal_address(&owner_hash_dec, &recovery.to_string())
             .await?;
-        let mut ledger = Vec::new();
-        let (_f, l1) = self
+        Ok(PreparedDeposit {
+            note: OwnedNote {
+                amount: u128_fr(net),
+                ..sealed
+            },
+            onchain_note,
+            portal_address,
+            gross,
+            recovery: recovery.to_string(),
+        })
+    }
+
+    /// Fund a persisted shield portal.
+    pub async fn fund_prepared_deposit(
+        &self,
+        prepared: &PreparedDeposit,
+        operator_priv: &str,
+        route: Route,
+    ) -> Result<TxLedger> {
+        let funding = self
             .submit_call(
                 operator_priv,
-                &portal_addr,
+                &prepared.portal_address,
                 vec![],
-                &gross.to_string(),
+                &prepared.gross.to_string(),
                 60_000,
-                funding_route,
+                route,
                 "shield:fund-portal",
             )
-            .await?;
-        ledger.push(l1);
+            .await;
+        match funding {
+            Ok((_outcome, ledger)) => Ok(ledger),
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                for _ in 0..20 {
+                    if self
+                        .eth_balance(&prepared.portal_address)
+                        .await
+                        .is_ok_and(|balance| balance >= prepared.gross)
+                    {
+                        return Ok(recovered);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(error)
+            }
+        }
+    }
 
-        // Deploy + shield (operator holds OPERATOR_ROLE).
-        let calldata = curvy_abi::encode_deploy_shield_portal(&onchain, recovery)?;
-        let (_d, l2) = self
+    /// Deploy and shield a funded portal.
+    pub async fn shield_prepared_deposit(
+        &self,
+        prepared: &PreparedDeposit,
+        operator_priv: &str,
+        route: Route,
+    ) -> Result<TxLedger> {
+        let calldata =
+            curvy_abi::encode_deploy_shield_portal(&prepared.onchain_note, &prepared.recovery)?;
+        let deployed = self
             .submit_call(
                 operator_priv,
                 &self.portal_factory,
                 calldata,
                 "0",
                 2_000_000,
-                protocol_route,
+                route,
                 "shield:deploy+shield",
             )
-            .await?;
-        ledger.push(l2);
-
-        // The committed note carries the NET amount (what autoShield's noteId hashes).
-        let committed = OwnedNote {
-            amount: u128_fr(net),
-            ..sealed
-        };
-
-        // Verify: the aggregator emitted a PendingNotes with this noteId.
-        let want = fr_to_dec(&committed.note_id());
-        let mut seen = false;
-        for _ in 0..20 {
-            let head = self.notes.head_block().await?;
-            seen = self
-                .notes
-                .pending_notes(0, head)
-                .await?
-                .iter()
-                .any(|event| event.note_ids.contains(&want));
-            if seen {
-                break;
+            .await;
+        match deployed {
+            Ok((_outcome, ledger)) => Ok(ledger),
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                if self
+                    .wait_for_note_statuses(&[prepared.note.note_id()], &[1, 2])
+                    .await
+                {
+                    Ok(recovered)
+                } else {
+                    Err(error)
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        if !seen {
-            bail!("shield: PendingNotes for noteId {want} not found in the configured index");
-        }
-        Ok((committed, ledger))
+    }
+
+    /// Fund, deploy and shield a deterministic entry portal.
+    ///
+    /// This convenience method has no durable journal. Production callers must persist
+    /// [`PreparedDeposit`] and use the two staged methods so a crash after funding does
+    /// not lose the only handle to that portal.
+    #[deprecated(note = "persist prepare_deposit, then call the two staged methods")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn deposit(
+        &self,
+        recipient: &Account,
+        gross: u128,
+        token: u64,
+        operator_priv: &str,
+        recovery: &str,
+        funding_route: Route,
+        protocol_route: Route,
+    ) -> Result<(OwnedNote, Vec<TxLedger>)> {
+        let prepared = self
+            .prepare_deposit(recipient, gross, token, recovery)
+            .await?;
+        let funding = self
+            .fund_prepared_deposit(&prepared, operator_priv, funding_route)
+            .await?;
+        let shield = self
+            .shield_prepared_deposit(&prepared, operator_priv, protocol_route)
+            .await?;
+        Ok((prepared.note, vec![funding, shield]))
     }
 
     /// Compatibility wrapper that uses one backend for both deposit transactions.
+    #[deprecated(note = "persist prepare_deposit, then call the two staged methods")]
     pub async fn shield(
         &self,
         recipient: &Account,
@@ -362,34 +586,30 @@ impl CurvyClient {
         recovery: &str,
         route: Route,
     ) -> Result<(OwnedNote, Vec<TxLedger>)> {
-        self.deposit(
-            recipient,
-            gross,
-            token,
-            operator_priv,
-            recovery,
-            route,
-            route,
-        )
-        .await
+        let prepared = self
+            .prepare_deposit(recipient, gross, token, recovery)
+            .await?;
+        let funding = self
+            .fund_prepared_deposit(&prepared, operator_priv, route)
+            .await?;
+        let shield = self
+            .shield_prepared_deposit(&prepared, operator_priv, route)
+            .await?;
+        Ok((prepared.note, vec![funding, shield]))
     }
 
-    // ── sync: rebuild the mirrored IMT from CommittedNotes + reconcile the root ───
+    // Note-tree synchronization.
 
-    /// Rebuild the local IMT and reconcile it against the chain root (the trust
-    /// anchor). Tolerates index-ahead-of-root on fast blocks (plan risk 8) with a
-    /// short retry. Returns the reconciled leaf log.
-    ///
-    /// Leaves come from a checkpoint-pinned snapshot when the backend serves one, and
-    /// otherwise from folding the `CommittedNotes` log. Reconciliation against the
-    /// chain root is identical either way, so the snapshot is a robustness win rather
-    /// than a change of trust model - see [`leaves_from_events`] for why the fold is
-    /// the weaker of the two.
+    /// Rebuild the local note tree and reconcile it against the chain root.
     pub async fn sync(&self) -> Result<Vec<Fr>> {
         let mut last_local_root = String::new();
         for _ in 0..20 {
             let leaves = match self.notes.notes_tree_snapshot().await? {
-                Some(snapshot) => snapshot.leaves.iter().map(|id| fr_from_dec(id)).collect(),
+                Some(snapshot) => snapshot
+                    .leaves
+                    .iter()
+                    .map(|id| parse_fr_decimal(id, "snapshot note id"))
+                    .collect::<Result<Vec<_>>>()?,
                 None => self.leaves_from_events().await?,
             };
 
@@ -406,16 +626,7 @@ impl CurvyClient {
         )
     }
 
-    /// Rebuild the leaf log by folding the `CommittedNotes` event log.
-    ///
-    /// The fallback for backends that cannot serve a leaf-indexed snapshot (a plain
-    /// `eth_getLogs` reader has no tree frontier to derive positions from). It infers
-    /// each leaf's position from event arrival order - batch order, then position
-    /// within the batch, skipping the zero-id padding slots exactly as the aggregator
-    /// does. That reproduces the on-chain tree only while the index reports events in
-    /// chain order, an assumption the event log itself never states; a wrong order
-    /// yields a wrong root rather than an error, which the reconcile below then
-    /// reports as an unexplained mismatch.
+    /// Rebuild the leaf log from ordered `CommittedNotes` events.
     async fn leaves_from_events(&self) -> Result<Vec<Fr>> {
         let head = self.notes.head_block().await?;
         let mut committed = self.notes.committed_notes(0, head).await?;
@@ -423,7 +634,7 @@ impl CurvyClient {
         let mut leaves = Vec::new();
         for event in &committed {
             for note_id in &event.note_ids {
-                let field = fr_from_dec(note_id);
+                let field = parse_fr_decimal(note_id, "committed note id")?;
                 if field != Fr::from(0u64) {
                     leaves.push(field);
                 }
@@ -432,17 +643,36 @@ impl CurvyClient {
         Ok(leaves)
     }
 
-    // ── Step 2: commit pending notes ──────────────────────────────────────────────
+    // Pending-note commitments.
 
-    /// Commit a batch of pending note ids into the notes tree (batch-prover role,
-    /// client-side). Proves the pending-commitment circuit, calls `commitPendingNotes`,
-    /// and verifies the chain root advanced to the new root.
+    /// Commit pending note ids into the notes tree.
     pub async fn commit(
         &self,
         pending_ids: &[Fr],
         operator_priv: &str,
         route: Route,
     ) -> Result<Vec<TxLedger>> {
+        // The `(5,30)` profile accepts at most five note ids.
+        if pending_ids.len() > BATCH_SIZE {
+            bail!(
+                "commit takes at most {BATCH_SIZE} note ids per proof, got {}",
+                pending_ids.len()
+            );
+        }
+        if pending_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if pending_ids.iter().any(|id| *id == Fr::from(0u64)) {
+            bail!("commit note ids must be non-zero");
+        }
+        if pending_ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| pending_ids[..index].contains(id))
+        {
+            bail!("commit cannot include the same note id twice");
+        }
+
         let leaves = self.sync().await?;
         let tree = Imt::from_leaves(TREE_DEPTH, &leaves);
 
@@ -464,7 +694,7 @@ impl CurvyClient {
             &new_root,
             &proof,
         )?;
-        let (_o, ledger) = self
+        let submitted = self
             .submit_call(
                 operator_priv,
                 &self.aggregator,
@@ -474,29 +704,45 @@ impl CurvyClient {
                 route,
                 "commit",
             )
-            .await?;
+            .await;
+        let ledger = match submitted {
+            Ok((_outcome, ledger)) => ledger,
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                if !self.wait_for_note_statuses(pending_ids, &[2]).await {
+                    return Err(error);
+                }
+                recovered
+            }
+        };
 
-        // Verify the chain advanced to new_root and it is now a valid root.
-        let state = self.anchor.state().await?;
-        if state.current_notes_root != new_root {
-            bail!(
-                "commit: chain root {} != new root {new_root}",
-                state.current_notes_root
-            );
-        }
-        if !self.anchor.is_valid_notes_root(&new_root).await? {
-            bail!("commit: new root {new_root} not marked valid");
-        }
+        // The receipt confirms the signed call.
         Ok(vec![ledger])
     }
 
-    // ── Aggregation ──────────────────────────────────────────────────────────────
+    /// Minimum aggregation input under the current fee configuration.
+    pub async fn pix_minimum_input(
+        &self,
+        token: &Fr,
+        allocation_total: u128,
+        relayer_amount: u128,
+    ) -> Result<u128> {
+        let fees = self.fees.fees().await?;
+        let token_decimal = fr_to_dec(token);
+        minimum_pix_input_value(
+            allocation_total,
+            relayer_amount,
+            parse_gas_fee(&fees, &token_decimal)?,
+            parse_protocol_fee(&fees)?,
+        )
+    }
 
-    /// Spend `note_a` (owned by `spender`) against the committed notes root, sending
-    /// `amount_to_b` to `recipient` (real stealth send) with change back to the
-    /// spender and the protocol fee note. Proves aggregation(2,3,30,6), submits
-    /// `submitAggregationRequest` through the chosen route (blokli for the M2 exit),
-    /// and returns the sealed B-note (for the scan step) + the ledger.
+    // Aggregation.
+
+    /// Aggregate a committed note into a recipient note, change and a fee note.
     #[allow(clippy::too_many_arguments)]
     pub async fn aggregate(
         &self,
@@ -521,11 +767,7 @@ impl CurvyClient {
         .await
     }
 
-    /// Allocate value from a committed note to an explicitly supplied
-    /// BabyJubJub owner and shared secret.
-    ///
-    /// This is the Curvy realization of PIX `Allocate`: the recipient does not
-    /// need a legacy Curvy seed or `(S, V)` stealth meta-address.
+    /// Allocate value to a known BabyJubJub owner.
     #[allow(clippy::too_many_arguments)]
     pub async fn aggregate_to_known_owner(
         &self,
@@ -561,11 +803,23 @@ impl CurvyClient {
         submitter_priv: &str,
         route: Route,
     ) -> Result<(OwnedNote, Vec<TxLedger>)> {
+        if note_a.amount == Fr::from(0u64) {
+            bail!("aggregation input must have a non-zero amount");
+        }
+        if note_a.owner_pub != spender.bjj_pub {
+            bail!("aggregation input is not owned by the spender");
+        }
+        if amount_to_b == 0 || b_note.amount != u128_fr(amount_to_b) {
+            bail!("aggregation recipient amount must be non-zero and match its note");
+        }
+        if b_note.token != note_a.token {
+            bail!("aggregation input and output must use one token");
+        }
         let fees = self.fees.fees().await?;
         let token = note_a.token;
         let token_dec = fr_to_dec(&token);
 
-        // Inclusion proof for note_a against the committed root.
+        // Build the input inclusion proof.
         let leaves = self.sync().await?;
         let note_a_id = note_a.note_id();
         let idx = leaves
@@ -579,20 +833,29 @@ impl CurvyClient {
             siblings: tree.create_proof(idx).siblings,
         };
 
-        // Value math (mirror the circuit + TS witnessFromNotes).
+        // Calculate circuit values.
         let net = fr_u128(&note_a.amount)?;
         let gas_fee = parse_gas_fee(&fees, &token_dec)?;
         let protocol_fee_per_thousand = parse_protocol_fee(&fees)?;
         let spent_to_others = amount_to_b; // B != spender
-        let fee_amount = gas_fee + spent_to_others * protocol_fee_per_thousand / 1000;
+        let protocol_fee = spent_to_others
+            .checked_mul(protocol_fee_per_thousand)
+            .context("aggregate: protocol fee overflow")?
+            / 1000;
+        let fee_amount = gas_fee
+            .checked_add(protocol_fee)
+            .context("aggregate: total fee overflow")?;
+        let outgoing = amount_to_b
+            .checked_add(fee_amount)
+            .context("aggregate: amount plus fee overflow")?;
         let change = net
-            .checked_sub(amount_to_b + fee_amount)
+            .checked_sub(outgoing)
             .context("aggregate: note value too small for amount+fee")?;
 
-        // Seed pads/fee-note off the (random) note_a secret so they differ each run.
+        // Derive distinct padding and fee notes.
         let seed = curvy_core::field::fr_to_be_32(&note_a.shared_secret);
 
-        // Outputs: [recipient, change→self, zero-pad→self]; inputs: [note_a, zero-pad→self].
+        // Outputs: recipient, change, pad. Inputs: note and pad.
         let change_note = seal_note(&spender.identity(), u128_fr(change), token)?;
         let pad_out = zero_pad_note(spender.bjj_pub, token, &seed, 1);
         let output_notes = vec![b_note.to_core(), change_note.to_core(), pad_out.to_core()];
@@ -609,8 +872,8 @@ impl CurvyClient {
 
         // Fee note owned by the on-chain feeNotePublicKey.
         let fee_pub = (
-            fr_from_dec(&fees.fee_note_public_key[0]),
-            fr_from_dec(&fees.fee_note_public_key[1]),
+            parse_fr_decimal(&fees.fee_note_public_key[0], "fee public key x")?,
+            parse_fr_decimal(&fees.fee_note_public_key[1], "fee public key y")?,
         );
         let fee_n = fee_note(fee_recipient, fee_pub, u128_fr(fee_amount), token, &seed)?;
 
@@ -622,7 +885,7 @@ impl CurvyClient {
             &spender.k,
             spender.bjj_pub,
             notes_root,
-            fr_from_dec(&fees.protocol_fee_per_thousand),
+            u128_fr(protocol_fee_per_thousand),
             u128_fr(gas_fee),
             fee_pub,
         );
@@ -640,7 +903,7 @@ impl CurvyClient {
             &proof,
             &bundle.public_signals,
         )?;
-        let (_o, ledger) = self
+        let submitted = self
             .submit_call(
                 submitter_priv,
                 &self.aggregator,
@@ -650,40 +913,28 @@ impl CurvyClient {
                 route,
                 "aggregate",
             )
-            .await?;
-
-        // Verify: the B output note is now PENDING on-chain.
-        let want = fr_to_dec(&b_note.note_id());
-        if self.anchor.note_status(&want).await? != 1 {
-            bail!("aggregate: B output note {want} not in PENDING status after submit");
-        }
+            .await;
+        let ledger = match submitted {
+            Ok((_outcome, ledger)) => ledger,
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                if !self
+                    .wait_for_note_statuses(&[b_note.note_id()], &[1, 2])
+                    .await
+                {
+                    return Err(error);
+                }
+                recovered
+            }
+        };
         Ok((b_note, vec![ledger]))
     }
 
-    /// Execute the additive PIX aggregation profile: up to two committed notes owned
-    /// by one legacy Curvy account fan out to explicitly known BabyJubJub owners, one
-    /// change note, an optional relayer gas-reimbursement note, zero pads up to nine
-    /// regular outputs, and one fee note. Submitted as verifier profile `(2, 9)`.
-    ///
-    /// The circuit emits `maxOutputs + 1` notes - nine regular outputs plus the fee
-    /// note in its own constrained slot - so the ten-note shape PIX needs is
-    /// `7 allocations + change + relayer` across the nine, with the protocol fee note
-    /// separate. Passing a `relayer` therefore drops the allocation ceiling from eight
-    /// to seven.
-    ///
-    /// The relayer note is an **ordinary** output: nothing in the circuit constrains
-    /// its owner or amount (only the fee note is constrained). Production relies on
-    /// the relayer checking it before relaying - it trial-decrypts the aggregation's
-    /// output notes, refuses to submit when none is addressed to it, and refuses again
-    /// when the amount is under its live gas quote plus tolerance. So `relayer_amount`
-    /// must be sized against that quote, not guessed.
-    ///
-    /// That discovery step is why the relayer is an [`Identity`] rather than a
-    /// [`KnownOwner`]: its note is **stealth-sealed** so the operator's scan can find
-    /// it, matching the TS SDK, which routes the operator note through the same
-    /// `sendNote` path as any other recipient. A `KnownOwner` note carries no
-    /// announcement the relayer could trial-decrypt, so the paymaster would reject the
-    /// aggregation as having no operator note at all.
+    /// Execute verifier profile `(2, 9)` with allocations, change, an optional
+    /// stealth relayer note and a fee note.
     #[allow(clippy::too_many_arguments)]
     pub async fn aggregate_pix_allocations(
         &self,
@@ -737,9 +988,7 @@ impl CurvyClient {
                 bail!("PIX allocation owner must differ from the funding account");
             }
         }
-        // Not cosmetic: the fee base below counts outputs the spender does not own, so
-        // a relayer note owned by the spender would be excluded by the circuit while
-        // this code counted it, and the fee-note constraint would fail.
+        // The relayer note contributes to the non-spender fee base.
         if relayer.is_some_and(|(identity, _)| identity.bjj_pub == spender.bjj_pub) {
             bail!("PIX relayer owner must differ from the funding account");
         }
@@ -829,8 +1078,8 @@ impl CurvyClient {
         }
 
         let fee_public_key = (
-            fr_from_dec(&fees.fee_note_public_key[0]),
-            fr_from_dec(&fees.fee_note_public_key[1]),
+            parse_fr_decimal(&fees.fee_note_public_key[0], "fee public key x")?,
+            parse_fr_decimal(&fees.fee_note_public_key[1], "fee public key y")?,
         );
         let fee = fee_note(
             fee_recipient,
@@ -851,7 +1100,7 @@ impl CurvyClient {
             &fee.to_core(),
             &signer,
             notes_root,
-            fr_from_dec(&fees.protocol_fee_per_thousand),
+            u128_fr(protocol_fee_per_thousand),
             u128_fr(gas_fee),
             fee_public_key,
         )?;
@@ -878,7 +1127,9 @@ impl CurvyClient {
             &proof,
             &bundle.public_signals,
         )?;
-        let (_outcome, ledger) = self
+        let mut emitted_notes = regular_outputs;
+        emitted_notes.push(fee);
+        let submitted = self
             .submit_call(
                 submitter_priv,
                 &self.aggregator,
@@ -888,16 +1139,35 @@ impl CurvyClient {
                 route,
                 "pix-aggregate-2x9",
             )
-            .await?;
-
-        let mut emitted_notes = regular_outputs;
-        emitted_notes.push(fee);
-        for note in &emitted_notes {
-            let note_id = fr_to_dec(&note.note_id());
-            if self.anchor.note_status(&note_id).await? != 1 {
-                bail!("PIX aggregation output {note_id} is not PENDING after submission");
+            .await;
+        let ledger = match submitted {
+            Ok((_outcome, ledger)) => ledger,
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                let output_ids = emitted_notes
+                    .iter()
+                    .filter(|note| note.amount != Fr::from(0u64))
+                    .map(OwnedNote::note_id)
+                    .collect::<Vec<_>>();
+                if !self.wait_for_note_statuses(&output_ids, &[1, 2]).await {
+                    return Err(AmbiguousPixAggregation {
+                        result: PixAggregationResult {
+                            allocations: allocation_notes,
+                            change,
+                            relayer: relayer_note,
+                            emitted_notes,
+                            ledger: vec![recovered],
+                        },
+                        source: error,
+                    }
+                    .into());
+                }
+                recovered
             }
-        }
+        };
 
         Ok(PixAggregationResult {
             allocations: allocation_notes,
@@ -908,12 +1178,9 @@ impl CurvyClient {
         })
     }
 
-    // ── Stretch: withdraw a committed note to an EOA ──────────────────────────────
+    // Withdrawal.
 
-    /// Withdraw a **committed** note owned by `spender` to a plain `destination` EOA.
-    /// Proves withdrawal(2,30) (note + zero-pad), calls `submitWithdrawalRequest`, and
-    /// returns the amount the vault delivers to the destination (net of the vault's
-    /// `withdrawalFee` and the per-token withdrawal gas that reimburses the relayer).
+    /// Withdraw a committed note to an EOA.
     pub async fn withdraw(
         &self,
         spender: &Account,
@@ -922,6 +1189,12 @@ impl CurvyClient {
         submitter_priv: &str,
         route: Route,
     ) -> Result<(u128, Vec<TxLedger>)> {
+        if note.amount == Fr::from(0u64) {
+            bail!("withdrawal input must have a non-zero amount");
+        }
+        if note.owner_pub != spender.bjj_pub {
+            bail!("withdrawal input is not owned by the spender");
+        }
         let fees = self.fees.fees().await?;
         let token = note.token;
         let token_dec = fr_to_dec(&token);
@@ -940,7 +1213,7 @@ impl CurvyClient {
         };
 
         let dest_dec = curvy_abi::address_to_u160_dec(destination)?;
-        let destination_fr = fr_from_dec(&dest_dec);
+        let destination_fr = parse_fr_decimal(&dest_dec, "withdrawal destination")?;
 
         let seed = curvy_core::field::fr_to_be_32(&note.shared_secret);
         let pad = zero_pad_note(spender.bjj_pub, token, &seed, 7);
@@ -974,7 +1247,10 @@ impl CurvyClient {
             &proof_oc,
             &bundle.public_signals,
         )?;
-        let (_o, ledger) = self
+        let amount = fr_u128(&note.amount)?;
+        let gas = parse_withdrawal_gas(&fees, &token_dec)?;
+        let delivered = withdrawal_net(amount, fees.withdrawal_fee_bps, gas)?;
+        let submitted = self
             .submit_call(
                 submitter_priv,
                 &self.aggregator,
@@ -984,19 +1260,24 @@ impl CurvyClient {
                 route,
                 "withdraw",
             )
-            .await?;
-
-        let amount = fr_u128(&note.amount)?;
-        let wfee = amount * fees.withdrawal_fee_bps as u128 / 10_000;
-        let gas = parse_withdrawal_gas(&fees, &token_dec)?;
-        let delivered = amount.saturating_sub(wfee).saturating_sub(gas);
+            .await;
+        let ledger = match submitted {
+            Ok((_outcome, ledger)) => ledger,
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                if !self.wait_for_nullifiers(&[note.nullifier()]).await {
+                    return Err(error);
+                }
+                recovered
+            }
+        };
         Ok((delivered, vec![ledger]))
     }
 
-    /// Withdraw a committed note controlled by a scalar-native BabyJubJub key.
-    ///
-    /// PIX reconstructs the subgroup scalar itself, so this path deliberately
-    /// bypasses the legacy seed hash/prune derivation used by [`Account`].
+    /// Withdraw a committed note using its BabyJubJub scalar.
     pub async fn withdraw_with_scalar(
         &self,
         signer: &ScalarSigningKey,
@@ -1005,6 +1286,9 @@ impl CurvyClient {
         submitter_priv: &str,
         route: Route,
     ) -> Result<(u128, Vec<TxLedger>)> {
+        if note.amount == Fr::from(0u64) {
+            bail!("PIX withdrawal input must have a non-zero amount");
+        }
         let fees = self.fees.fees().await?;
         let token = note.token;
         let token_dec = fr_to_dec(&token);
@@ -1027,7 +1311,7 @@ impl CurvyClient {
         };
 
         let destination_decimal = curvy_abi::address_to_u160_dec(destination)?;
-        let destination_field = fr_from_dec(&destination_decimal);
+        let destination_field = parse_fr_decimal(&destination_decimal, "withdrawal destination")?;
         let seed = curvy_core::field::fr_to_be_32(&note.shared_secret);
         let padding_note = zero_pad_note(owner, token, &seed, 0x5049_5807);
         let input_notes = vec![note.to_core(), padding_note.to_core()];
@@ -1056,7 +1340,10 @@ impl CurvyClient {
         let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
         let calldata =
             curvy_abi::encode_submit_withdrawal(LEGACY_MAX_INPUTS, &proof, &bundle.public_signals)?;
-        let (_outcome, ledger) = self
+        let amount = fr_u128(&note.amount)?;
+        let withdrawal_gas = parse_withdrawal_gas(&fees, &token_dec)?;
+        let delivered = withdrawal_net(amount, fees.withdrawal_fee_bps, withdrawal_gas)?;
+        let submitted = self
             .submit_call(
                 submitter_priv,
                 &self.aggregator,
@@ -1066,14 +1353,20 @@ impl CurvyClient {
                 route,
                 "pix-withdraw",
             )
-            .await?;
-
-        let amount = fr_u128(&note.amount)?;
-        let withdrawal_fee = amount * fees.withdrawal_fee_bps as u128 / 10_000;
-        let withdrawal_gas = parse_withdrawal_gas(&fees, &token_dec)?;
-        let delivered = amount
-            .saturating_sub(withdrawal_fee)
-            .saturating_sub(withdrawal_gas);
+            .await;
+        let ledger = match submitted {
+            Ok((_outcome, ledger)) => ledger,
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                if !self.wait_for_nullifiers(&[note.nullifier()]).await {
+                    return Err(error);
+                }
+                recovered
+            }
+        };
         Ok((delivered, vec![ledger]))
     }
 
@@ -1147,10 +1440,7 @@ impl CurvyClient {
         }
 
         let destination_decimal = curvy_abi::address_to_u160_dec(destination)?;
-        // The `&dyn NoteSigner` views live only for the witness build. Keeping them in
-        // an inner scope is what makes this future `Send`: a trait object borrowed in
-        // the enclosing scope stays part of the async state machine even after an
-        // explicit drop, and `NoteSigner` is not `Sync`.
+        // Scope trait-object borrows so the future remains `Send`.
         let witness = {
             let mut signers =
                 Vec::<&dyn NoteSigner>::with_capacity(PIX_WITHDRAWAL_MAX_INPUTS as usize);
@@ -1165,7 +1455,7 @@ impl CurvyClient {
                 &signers,
                 &input_proofs,
                 notes_root,
-                fr_from_dec(&destination_decimal),
+                parse_fr_decimal(&destination_decimal, "withdrawal destination")?,
                 token,
             )?
         };
@@ -1181,7 +1471,17 @@ impl CurvyClient {
             &proof,
             &bundle.public_signals,
         )?;
-        let (_outcome, ledger) = self
+        // Complete fallible calculations before submission.
+        let total = spends.iter().try_fold(0u128, |total, (_, note)| {
+            total
+                .checked_add(fr_u128(&note.amount)?)
+                .context("PIX withdrawal total overflow")
+        })?;
+        let fees = self.fees.fees().await?;
+        let token_decimal = fr_to_dec(&token);
+        let withdrawal_gas = parse_withdrawal_gas(&fees, &token_decimal)?;
+        let delivered = withdrawal_net(total, fees.withdrawal_fee_bps, withdrawal_gas)?;
+        let submitted = self
             .submit_call(
                 submitter_priv,
                 &self.aggregator,
@@ -1191,28 +1491,30 @@ impl CurvyClient {
                 route,
                 "pix-withdraw-10-owner",
             )
-            .await?;
-
-        let total = spends.iter().try_fold(0u128, |total, (_, note)| {
-            total
-                .checked_add(fr_u128(&note.amount)?)
-                .context("PIX withdrawal total overflow")
-        })?;
-        let fees = self.fees.fees().await?;
-        let withdrawal_fee = total * fees.withdrawal_fee_bps as u128 / 10_000;
-        let token_decimal = fr_to_dec(&token);
-        let withdrawal_gas = parse_withdrawal_gas(&fees, &token_decimal)?;
-        let delivered = total
-            .saturating_sub(withdrawal_fee)
-            .saturating_sub(withdrawal_gas);
+            .await;
+        let ledger = match submitted {
+            Ok((_outcome, ledger)) => ledger,
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                let nullifiers = spends
+                    .iter()
+                    .map(|(_, note)| note.nullifier())
+                    .collect::<Vec<_>>();
+                if !self.wait_for_nullifiers(&nullifiers).await {
+                    return Err(error);
+                }
+                recovered
+            }
+        };
         Ok((delivered, vec![ledger]))
     }
 
-    // ── Step 4: scan / receive ────────────────────────────────────────────────────
+    // Note scanning.
 
-    /// Scan all `PendingNotes` for notes owned by `account`: real stealth discovery
-    /// (ECDH + view-tag prefilter), `decrypt_amount_token` for encrypted leaves, then
-    /// the integrity gate (recompute noteId; drop mismatches).
+    /// Scan pending events for notes owned by `account`.
     pub async fn scan(&self, account: &Account) -> Result<Vec<Discovered>> {
         let head = self.notes.head_block().await?;
         let events = self.notes.pending_notes(0, head).await?;
@@ -1222,16 +1524,32 @@ impl CurvyClient {
         // (note_id, enc_amount, enc_token, is_plaintext, eph_x, eph_y)
         let mut meta: Vec<(String, String, String, bool, String, String)> = Vec::new();
         for ev in &events {
+            let len = ev.note_ids.len();
+            anyhow::ensure!(
+                ev.ephemeral_keys[0].len() == len
+                    && ev.ephemeral_keys[1].len() == len
+                    && ev.view_tags.len() == len
+                    && ev.amounts.len() == len
+                    && ev.tokens.len() == len
+                    && ev.is_plaintext.len() == len,
+                "PendingNotes event {} has inconsistent parallel-array lengths",
+                ev.tx_hash
+            );
+            anyhow::ensure!(
+                ev.view_tags.iter().all(|tag| u16::try_from(*tag).is_ok()),
+                "PendingNotes event {} has a view tag outside uint16",
+                ev.tx_hash
+            );
             for i in 0..ev.note_ids.len() {
-                let ex = ev.ephemeral_keys[0].get(i).cloned().unwrap_or_default();
-                let ey = ev.ephemeral_keys[1].get(i).cloned().unwrap_or_default();
+                let ex = ev.ephemeral_keys[0][i].clone();
+                let ey = ev.ephemeral_keys[1][i].clone();
                 rs.push(format!("{ex}.{ey}"));
-                tags.push(format!("{:02x}", ev.view_tags.get(i).copied().unwrap_or(0)));
+                tags.push(format!("{:02x}", ev.view_tags[i]));
                 meta.push((
                     ev.note_ids[i].clone(),
-                    ev.amounts.get(i).cloned().unwrap_or_default(),
-                    ev.tokens.get(i).cloned().unwrap_or_default(),
-                    ev.is_plaintext.get(i).copied().unwrap_or(false),
+                    ev.amounts[i].clone(),
+                    ev.tokens[i].clone(),
+                    ev.is_plaintext[i],
                     ex,
                     ey,
                 ));
@@ -1243,27 +1561,34 @@ impl CurvyClient {
 
         let mut out = Vec::new();
         for m in matches {
-            let (note_id_dec, enc_amount, enc_token, is_plain, ex, ey) = &meta[m.index as usize];
-            let shared_secret = fr_from_dec(m.spending_pub_key.split('.').next().unwrap_or("0"));
+            let index: usize = m.index.try_into().context("stealth match index overflow")?;
+            let (note_id_dec, enc_amount, enc_token, is_plain, ex, ey) = meta
+                .get(index)
+                .with_context(|| format!("stealth match index {index} is out of bounds"))?;
+            let (shared_secret, _) =
+                parse_xy(&m.spending_pub_key).context("parse scanned shared-secret point")?;
 
             let (amount, token) = if *is_plain {
-                (fr_from_dec(enc_amount), fr_from_dec(enc_token))
+                (
+                    parse_fr_decimal(enc_amount, "plaintext note amount")?,
+                    parse_fr_decimal(enc_token, "plaintext note token")?,
+                )
             } else {
                 let ss = fr_to_biguint(&shared_secret);
-                let ebx = fr_to_biguint(&fr_from_dec(ex));
-                let eby = fr_to_biguint(&fr_from_dec(ey));
+                let ebx = fr_to_biguint(&parse_fr_decimal(ex, "ephemeral key x")?);
+                let eby = fr_to_biguint(&parse_fr_decimal(ey, "ephemeral key y")?);
                 decrypt_amount_token(
-                    fr_from_dec(enc_amount),
-                    fr_from_dec(enc_token),
+                    parse_fr_decimal(enc_amount, "encrypted note amount")?,
+                    parse_fr_decimal(enc_token, "encrypted note token")?,
                     &ss,
                     (&ebx, &eby),
                 )
             };
 
-            // Integrity gate: recompute ownerHash + noteId, drop on mismatch.
+            // Verify the note id before returning a match.
             let oh = owner_hash(account.bjj_pub, shared_secret);
             let nid = note_id(oh, amount, token);
-            if fr_to_dec(&nid) == *note_id_dec {
+            if nid == parse_fr_decimal(note_id_dec, "pending note id")? {
                 out.push(Discovered {
                     note_id: nid,
                     amount,
@@ -1277,10 +1602,10 @@ impl CurvyClient {
     }
 }
 
-/// How one PIX aggregation splits its input value.
+/// Aggregation value split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixValueSplit {
-    /// Output value the spender does not own - the protocol fee base.
+    /// Output value the spender does not own.
     pub spent_to_others: u128,
     /// The fee note's amount: `gasFee + floor(spent_to_others * rate / 1000)`.
     pub fee_amount: u128,
@@ -1288,17 +1613,19 @@ pub struct PixValueSplit {
     pub change_amount: u128,
 }
 
-/// Mirror the `(2,9)` circuit's value arithmetic.
-///
-/// The circuit accumulates `totalSpentValue += amount * (1 - isSender)` over the
-/// regular outputs, so the protocol fee is charged on every output the spender does
-/// **not** own - allocations *and* the relayer's gas-reimbursement note - while change
-/// and the zero pads (owned by the spender) are excluded. It then constrains
-/// `feeNote.amount === gasFee + protocolFeeQ` and
-/// `totalOutputValue === totalInputValue - feeNote.amount`.
-///
-/// Getting the base wrong does not fail loudly at build time: it produces a witness
-/// the constraint system rejects, which surfaces as an opaque proving failure.
+/// Calculate the amount delivered by a withdrawal.
+fn withdrawal_net(total: u128, withdrawal_fee_bps: u64, withdrawal_gas: u128) -> Result<u128> {
+    let withdrawal_fee = total
+        .checked_mul(withdrawal_fee_bps as u128)
+        .context("withdrawal fee multiplication overflow")?
+        / 10_000;
+    total
+        .checked_sub(withdrawal_fee)
+        .and_then(|amount| amount.checked_sub(withdrawal_gas))
+        .context("withdrawal amount does not cover protocol and gas fees")
+}
+
+/// Calculate the `(2,9)` aggregation values.
 fn pix_value_split(
     input_total: u128,
     allocation_total: u128,
@@ -1330,6 +1657,24 @@ fn pix_value_split(
     })
 }
 
+fn minimum_pix_input_value(
+    allocation_total: u128,
+    relayer_amount: u128,
+    gas_fee: u128,
+    protocol_fee_per_thousand: u128,
+) -> Result<u128> {
+    let split = pix_value_split(
+        u128::MAX,
+        allocation_total,
+        relayer_amount,
+        gas_fee,
+        protocol_fee_per_thousand,
+    )?;
+    u128::MAX
+        .checked_sub(split.change_amount)
+        .context("PIX minimum input underflow")
+}
+
 /// Rebuild the real depth-6 per-token gas-fee tree and return `(siblings, root)` for
 /// `token`. Leaf[tokenId] = that token's `pendingNoteCommitment`; the root must equal
 /// the on-chain `commitmentFeeRoot`.
@@ -1339,11 +1684,20 @@ fn real_gas_fee_proof(fees: &FeeConfig, token_dec: &str) -> Result<(Vec<String>,
     let mut leaves = vec![Fr::from(0u64); n];
     for g in &fees.per_token_gas_fees {
         let tid: usize = g.token_id.parse().context("gas-fee token id")?;
-        if tid < n {
-            leaves[tid] = fr_from_dec(&g.pending_note_commitment);
-        }
+        anyhow::ensure!(
+            tid < n,
+            "gas-fee token id {tid} exceeds depth-{GAS_TREE_DEPTH} tree"
+        );
+        leaves[tid] = parse_fr_decimal(
+            &g.pending_note_commitment,
+            "pending-note commitment gas fee",
+        )?;
     }
     let token_index: usize = token_dec.parse().context("token id")?;
+    anyhow::ensure!(
+        token_index < n,
+        "token id {token_index} exceeds depth-{GAS_TREE_DEPTH} gas-fee tree"
+    );
     let tree = Imt::from_leaves(GAS_TREE_DEPTH, &leaves);
     let proof = tree.create_proof(token_index);
     Ok((
@@ -1354,15 +1708,235 @@ fn real_gas_fee_proof(fees: &FeeConfig, token_dec: &str) -> Result<(Vec<String>,
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
     use super::*;
 
     const RATE: u128 = 10; // protocolFeePerThousand
     const GAS: u128 = 500;
 
+    #[derive(Default)]
+    struct SubmissionProbe {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        sequence: AtomicUsize,
+        transport_failure: AtomicBool,
+    }
+
+    #[async_trait]
+    impl TxSubmitter for SubmissionProbe {
+        async fn submit(&self, raw: &curvy_types::RawTx) -> curvy_chain_api::Result<TxOutcome> {
+            if self.transport_failure.load(Ordering::SeqCst) {
+                return Err(ChainError::Transport("response lost".to_string()));
+            }
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+            Ok(TxOutcome {
+                tx_hash: format!("0x{}", hex::encode(Keccak256::digest(&raw.0))),
+                block_number: Some(sequence as u64),
+                status: true,
+            })
+        }
+
+        fn backend(&self) -> &'static str {
+            "probe"
+        }
+    }
+
+    #[async_trait]
+    impl BalanceReader for SubmissionProbe {
+        async fn eth_balance(&self, _addr: &String) -> curvy_chain_api::Result<String> {
+            Ok("0".to_string())
+        }
+
+        async fn vault_balance(
+            &self,
+            _owner: &String,
+            _token_id: &String,
+        ) -> curvy_chain_api::Result<String> {
+            Ok("0".to_string())
+        }
+
+        async fn tx_count(&self, _addr: &String) -> curvy_chain_api::Result<u64> {
+            Ok(0)
+        }
+
+        async fn gas_price(&self) -> curvy_chain_api::Result<u128> {
+            Ok(1)
+        }
+
+        async fn chain_id(&self) -> curvy_chain_api::Result<u64> {
+            Ok(31337)
+        }
+    }
+
+    #[async_trait]
+    impl NoteIndexSource for SubmissionProbe {
+        async fn pending_notes(
+            &self,
+            _from_block: u64,
+            _to_block: u64,
+        ) -> curvy_chain_api::Result<Vec<curvy_types::PendingNotesEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn committed_notes(
+            &self,
+            _from_block: u64,
+            _to_block: u64,
+        ) -> curvy_chain_api::Result<Vec<curvy_types::CommittedNotesEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn committed_nullifiers(
+            &self,
+            _from_block: u64,
+            _to_block: u64,
+        ) -> curvy_chain_api::Result<Vec<curvy_types::CommittedNullifiersEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn head_block(&self) -> curvy_chain_api::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[async_trait]
+    impl RootAnchor for SubmissionProbe {
+        async fn state(&self) -> curvy_chain_api::Result<curvy_types::AggregatorState> {
+            Ok(curvy_types::AggregatorState::default())
+        }
+
+        async fn is_valid_notes_root(&self, _root: &String) -> curvy_chain_api::Result<bool> {
+            Ok(false)
+        }
+
+        async fn note_status(&self, _note_id: &String) -> curvy_chain_api::Result<u8> {
+            Ok(0)
+        }
+    }
+
+    #[async_trait]
+    impl FeeConfigSource for SubmissionProbe {
+        async fn fees(&self) -> curvy_chain_api::Result<FeeConfig> {
+            Ok(FeeConfig::default())
+        }
+    }
+
+    #[async_trait]
+    impl PortalDirectory for SubmissionProbe {
+        async fn entry_portal_address(
+            &self,
+            _owner_hash: &String,
+            _recovery: &String,
+        ) -> curvy_chain_api::Result<String> {
+            Ok("0x0000000000000000000000000000000000000001".to_string())
+        }
+
+        async fn portal_is_registered(&self, _portal: &String) -> curvy_chain_api::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn probe_client(probe: Arc<SubmissionProbe>) -> CurvyClient {
+        CurvyClient::new(
+            probe.clone(),
+            probe.clone(),
+            probe.clone(),
+            probe.clone(),
+            probe.clone(),
+            probe.clone(),
+            probe,
+            "0x0000000000000000000000000000000000000001".to_string(),
+            "0x0000000000000000000000000000000000000002".to_string(),
+            31337,
+        )
+    }
+
+    const TEST_SIGNER: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+    #[tokio::test]
+    async fn submissions_from_one_signer_are_nonce_serialized() {
+        let probe = Arc::new(SubmissionProbe::default());
+        let client = probe_client(probe.clone());
+        let first = client.submit_call(
+            TEST_SIGNER,
+            "0x0000000000000000000000000000000000000001",
+            Vec::new(),
+            "0",
+            21_000,
+            Route::Direct,
+            "first",
+        );
+        let second = client.submit_call(
+            TEST_SIGNER,
+            "0x0000000000000000000000000000000000000001",
+            Vec::new(),
+            "0",
+            21_000,
+            Route::Direct,
+            "second",
+        );
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(probe.max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lost_submit_response_is_explicitly_ambiguous() {
+        let probe = Arc::new(SubmissionProbe::default());
+        probe.transport_failure.store(true, Ordering::SeqCst);
+        let client = probe_client(probe);
+        let error = client
+            .submit_call(
+                TEST_SIGNER,
+                "0x0000000000000000000000000000000000000001",
+                Vec::new(),
+                "0",
+                21_000,
+                Route::Direct,
+                "lost",
+            )
+            .await
+            .unwrap_err();
+        let ambiguous = ambiguous_submission(&error).expect("must retain unknown outcome");
+        assert_eq!(ambiguous.ledger.label, "lost");
+        assert!(ambiguous.ledger.tx_hash.starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_zero_and_duplicate_ids_before_chain_work() {
+        let client = probe_client(Arc::new(SubmissionProbe::default()));
+        assert!(
+            client
+                .commit(&[Fr::from(0u64)], TEST_SIGNER, Route::Direct)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("non-zero")
+        );
+        assert!(
+            client
+                .commit(
+                    &[Fr::from(7u64), Fr::from(7u64)],
+                    TEST_SIGNER,
+                    Route::Direct,
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("twice")
+        );
+    }
+
     #[test]
     fn relayer_note_is_part_of_the_protocol_fee_base() {
-        // The circuit charges outputs the spender does not own, so adding a relayer
-        // note must raise the fee - not merely reduce the change by its face value.
         let without = pix_value_split(1_000_000, 100_000, 0, GAS, RATE).unwrap();
         let with = pix_value_split(1_000_000, 100_000, 10_000, GAS, RATE).unwrap();
 
@@ -1370,14 +1944,11 @@ mod tests {
         assert_eq!(with.spent_to_others, 110_000);
         assert_eq!(without.fee_amount, GAS + 1_000);
         assert_eq!(with.fee_amount, GAS + 1_100);
-        // Change drops by the relayer note plus the extra protocol fee it attracts.
         assert_eq!(without.change_amount - with.change_amount, 10_000 + 100);
     }
 
     #[test]
     fn value_conservation_matches_the_circuit_constraint() {
-        // totalOutputValue === totalInputValue - feeNote.amount, where the regular
-        // outputs are allocations + relayer + change.
         let split = pix_value_split(2_000_000, 350_000, 1_000, GAS, RATE).unwrap();
         let outputs = 350_000 + 1_000 + split.change_amount;
         assert_eq!(outputs, 2_000_000 - split.fee_amount);
@@ -1385,8 +1956,6 @@ mod tests {
 
     #[test]
     fn protocol_fee_floors_like_the_circuit_quotient() {
-        // protocolFeeQ is a floored quotient with the remainder range-checked, so the
-        // SDK must floor identically rather than round.
         let split = pix_value_split(1_000_000, 999, 0, 0, RATE).unwrap();
         assert_eq!(split.fee_amount, 9); // floor(999 * 10 / 1000) == 9
     }
@@ -1401,8 +1970,15 @@ mod tests {
     }
 
     #[test]
+    fn minimum_input_includes_allocations_gas_and_protocol_fee() {
+        assert_eq!(
+            minimum_pix_input_value(100_000, 10_000, GAS, RATE).unwrap(),
+            110_000 + GAS + 1_100
+        );
+    }
+
+    #[test]
     fn absent_token_yields_a_zero_gas_fee_rather_than_an_error() {
-        // gas_fee_for() reports "0" for unregistered tokens; that must parse, not fail.
         let fees = FeeConfig::default();
         assert_eq!(parse_gas_fee(&fees, "7").unwrap(), 0);
         assert_eq!(parse_withdrawal_gas(&fees, "7").unwrap(), 0);
@@ -1422,5 +1998,17 @@ mod tests {
         };
         assert!(parse_protocol_fee(&fees).is_err());
         assert!(parse_gas_fee(&fees, "1").is_err());
+    }
+
+    #[test]
+    fn withdrawal_math_rejects_multiplication_overflow() {
+        let error = withdrawal_net(u128::MAX, u64::MAX, 0).unwrap_err();
+        assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn withdrawal_math_rejects_fees_larger_than_the_note() {
+        let error = withdrawal_net(10, 0, 11).unwrap_err();
+        assert!(error.to_string().contains("does not cover"));
     }
 }

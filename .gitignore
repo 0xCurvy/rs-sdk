@@ -2,3 +2,10 @@
 .DS_Store
 *.log
 .idea/
+
+# Proving keys fetched by scripts/fetch-keys.sh. 249 MB of evaluation setups, hash
+# checked at load, deliberately not in git.
+/zk-keys/
+
+# Working notes on undecided design questions. Tracked issues live elsewhere.
+/open-questions.md

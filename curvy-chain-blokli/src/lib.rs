@@ -1,22 +1,8 @@
-//! blokli [`TxSubmitter`] + [`NoteIndexSource`] adapter - a small reqwest GraphQL
-//! client against bloklid (`:8080 /graphql`). `sendTransactionSync(confirmations: 1)`
-//! is the submit path (anvil-localhost finality == 1); the union result is decoded
-//! into typed [`ChainError`]s (RpcError / validator rejections / timeouts) so the SDK
-//! sees one error model. The caller signs locally and pays gas; blokli never signs.
+//! Blokli GraphQL adapters for transaction submission and note indexing.
 //!
 //! ## Schema
-//! Targets the `curvy-events-finalized` Curvy indexing schema, which differs from the
-//! earlier flat-list shape in three ways that all matter for decoding:
-//!
-//! 1. every `curvy*` query returns a **union** (`… on CurvyPendingNotes { notes { … } }`),
-//!    so a failure arrives as a `QueryFailed` member rather than a transport error;
-//! 2. `noteId` / `batchIndex` / `nullifier` are `Hex32`, **not** decimal - they are
-//!    converted here, because everything past this seam speaks [`Dec`] and the field
-//!    parser in `curvy-core` panics on a `0x…` string;
-//! 3. results are ordered by `(block, txIndex, logIndex, eventItemIndex)` and paged by
-//!    an exclusive `after` cursor with a hard server cap of 1000 rows per page - so a
-//!    single unpaged request silently truncates a busy chain. Every read here follows
-//!    the cursor to exhaustion.
+//! Curvy queries return unions, use `Hex32` identifiers and paginate by an exclusive
+//! chain-position cursor.
 
 pub mod chain;
 
@@ -204,17 +190,12 @@ impl BlokliChain {
     pub async fn chain_info(&self) -> Result<(String, u64)> {
         let v = self.gql(CHAININFO_QUERY, serde_json::json!({})).await?;
         let node = &v["data"]["chainInfo"];
-        let network = node["network"].as_str().unwrap_or_default().to_string();
-        let chain_id = node["chainId"].as_i64().unwrap_or_default() as u64;
+        let network = string_field(node, "network")?;
+        let chain_id = u64_field(node, "chainId")?;
         Ok((network, chain_id))
     }
 
-    /// Follow the `after` cursor to exhaustion and return every row of `list_field`.
-    ///
-    /// Paging is the whole point: `first` is capped at 1000 server-side, so the
-    /// previous single-shot query silently lost rows once a chain had seen enough
-    /// Curvy activity - and a short read of the committed-notes log yields a wrong
-    /// tree root rather than an error.
+    /// Follow the `after` cursor to exhaustion.
     async fn paged_rows(
         &self,
         query: &str,
@@ -247,9 +228,7 @@ impl BlokliChain {
             let page_len = rows.len();
             for row in rows {
                 let position = position(row)?;
-                // `to_block` bounds the caller's window; the server only takes a lower
-                // bound, so trim here. Ordering is ascending, so this page and every
-                // later one are past the window - stop.
+                // Enforce the upper block bound locally.
                 if position.block > to_block {
                     return Ok(out);
                 }
@@ -266,15 +245,9 @@ impl BlokliChain {
     }
 }
 
-// ── field decoding ─────────────────────────────────────────────────────────────
+// Field decoding.
 
-/// Append a leaf, requiring it to land at the position it claims.
-///
-/// The whole point of the snapshot is that the server states each leaf's position
-/// rather than the client inferring it. blokli validates page density too, but a
-/// disagreement here is not cosmetic: a leaf placed one slot off shifts every later
-/// note in the depth-30 tree and produces a wrong root, which surfaces only as an
-/// unexplained reconcile failure much later. Fail where the cause is still visible.
+/// Append a leaf at its declared position.
 fn push_dense_leaf(leaves: &mut Vec<Dec>, leaf_index: u64, note_id: Dec) -> Result<()> {
     if leaf_index != leaves.len() as u64 {
         return Err(ChainError::Decode(format!(
@@ -286,14 +259,11 @@ fn push_dense_leaf(leaves: &mut Vec<Dec>, leaf_index: u64, note_id: Dec) -> Resu
     Ok(())
 }
 
-/// Resolve a Curvy union result to its success member.
-///
-/// Every `curvy*` query returns a union whose members are the payload type plus
-/// `QueryFailedError` (and sometimes `InvalidAddressError`) - note the `Error`
-/// suffix: the async-graphql type name is the Rust struct name, so a fragment on
-/// `QueryFailed` is an unknown type and fails validation for the whole query. The
-/// inline fragments inline the payload's fields onto this node, so callers read them
-/// straight off the returned value.
+/// Test whether a union response reports `NOT_FOUND`.
+pub(crate) fn is_not_found(response: &serde_json::Value, field: &str) -> bool {
+    response["data"][field]["code"].as_str() == Some("NOT_FOUND")
+}
+
 pub(crate) fn union_node<'a>(
     response: &'a serde_json::Value,
     field: &str,
@@ -338,17 +308,13 @@ fn u64_field(value: &serde_json::Value, name: &str) -> Result<u64> {
         .map_err(|error| ChainError::Decode(format!("invalid {name}: {error}")))
 }
 
-/// A `Hex32` field as a canonical decimal [`Dec`].
-///
-/// Everything past this seam treats field elements as decimal strings, and
-/// `curvy-core`'s parser *panics* on anything else - so a `0x…` value must never
-/// escape the adapter.
+/// Decode `Hex32` as a canonical decimal value.
 fn hex32_field(value: &serde_json::Value, name: &str) -> Result<Dec> {
     let raw = string_field(value, name)?;
     let digits = raw.strip_prefix("0x").unwrap_or(&raw);
-    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+    if digits.is_empty() || digits.len() > 64 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(ChainError::Decode(format!(
-            "field {name} is not hexadecimal: {raw:?}"
+            "field {name} is not a 32-byte hexadecimal value: {raw:?}"
         )));
     }
     num_bigint::BigUint::parse_bytes(digits.as_bytes(), 16)
@@ -526,20 +492,27 @@ impl NoteIndexSource for BlokliChain {
     }
 
     async fn notes_tree_snapshot(&self) -> Result<Option<NotesTreeSnapshot>> {
-        // No checkpoint yet is the normal state of a chain that has never committed a
-        // batch, not an error - report it as "unavailable" so the caller folds the
-        // event log instead. Both paths reconcile against the chain root afterwards.
+        // Only `NOT_FOUND` selects the event-log fallback.
         let response = self
             .gql(SYNC_CHECKPOINT_QUERY, serde_json::json!({}))
             .await?;
-        let Ok(checkpoint_node) = union_node(&response, "curvySyncCheckpoint") else {
-            return Ok(None);
+        let checkpoint_node = match union_node(&response, "curvySyncCheckpoint") {
+            Ok(node) => node,
+            Err(_) if is_not_found(&response, "curvySyncCheckpoint") => return Ok(None),
+            Err(error) => return Err(error),
         };
         let checkpoint = string_field(checkpoint_node, "blockHash")?;
         let notes_root = hex32_field(checkpoint_node, "notesRoot")?;
         let total = u64_field(checkpoint_node, "noteCount")?;
+        let tree_depth = u64_field(checkpoint_node, "treeDepth")?;
+        if tree_depth != 30 || total > (1u64 << tree_depth) {
+            return Err(ChainError::Decode(format!(
+                "invalid Curvy checkpoint shape: depth {tree_depth}, {total} notes"
+            )));
+        }
 
-        let mut leaves: Vec<Dec> = Vec::with_capacity(total as usize);
+        // Grow storage only as validated pages arrive.
+        let mut leaves: Vec<Dec> = Vec::new();
         while (leaves.len() as u64) < total {
             let page = self
                 .gql(
@@ -552,6 +525,16 @@ impl NoteIndexSource for BlokliChain {
                 )
                 .await?;
             let node = union_node(&page, "curvySyncNotes")?;
+            if string_field(node, "checkpoint")? != checkpoint {
+                return Err(ChainError::Decode(
+                    "curvySyncNotes changed checkpoint mid-snapshot".to_string(),
+                ));
+            }
+            if u64_field(node, "total")? != total {
+                return Err(ChainError::Decode(
+                    "curvySyncNotes changed total mid-snapshot".to_string(),
+                ));
+            }
             let rows = node
                 .get("notes")
                 .and_then(serde_json::Value::as_array)
@@ -565,6 +548,11 @@ impl NoteIndexSource for BlokliChain {
                 )));
             }
             for row in rows {
+                if leaves.len() as u64 >= total {
+                    return Err(ChainError::Decode(format!(
+                        "curvySyncNotes returned more than checkpoint total {total}"
+                    )));
+                }
                 push_dense_leaf(
                     &mut leaves,
                     u64_field(row, "leafIndex")?,
@@ -591,40 +579,7 @@ impl TxSubmitter for BlokliChain {
             )
             .await?;
 
-        let node = &res["data"]["sendTransactionSync"];
-        match node["__typename"].as_str() {
-            Some("Transaction") => {
-                let tx_hash = node["transactionHash"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                // Allowlist, not denylist: an unrecognized or missing status must not
-                // read as success, or a silently-unmined tx is reported as confirmed
-                // and the caller goes on to build on state that never landed.
-                let status = node["status"].as_str().unwrap_or_default();
-                if !status.eq_ignore_ascii_case("CONFIRMED")
-                    && !status.eq_ignore_ascii_case("MINED")
-                    && !status.eq_ignore_ascii_case("SUCCESS")
-                {
-                    return Err(ChainError::Rejected(format!(
-                        "sendTransactionSync returned status {status:?} for {tx_hash}"
-                    )));
-                }
-                Ok(TxOutcome {
-                    tx_hash,
-                    block_number: None,
-                    status: true,
-                })
-            }
-            Some(other) => {
-                let msg = node["message"].as_str().unwrap_or("(no message)");
-                let code = node["code"].as_str().unwrap_or("");
-                Err(ChainError::Rejected(format!("{other} {code}: {msg}")))
-            }
-            None => Err(ChainError::Decode(format!(
-                "unexpected sendTransactionSync result: {node}"
-            ))),
-        }
+        sync_transaction_outcome(&res["data"]["sendTransactionSync"])
     }
 
     fn backend(&self) -> &'static str {
@@ -632,9 +587,113 @@ impl TxSubmitter for BlokliChain {
     }
 }
 
+fn sync_transaction_outcome(node: &serde_json::Value) -> Result<TxOutcome> {
+    match node["__typename"].as_str() {
+        Some("Transaction") => {
+            let tx_hash = node["transactionHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            // Accept only explicit success statuses.
+            let status = node["status"].as_str().unwrap_or_default();
+            if !status.eq_ignore_ascii_case("CONFIRMED")
+                && !status.eq_ignore_ascii_case("MINED")
+                && !status.eq_ignore_ascii_case("SUCCESS")
+            {
+                if status.eq_ignore_ascii_case("FAILED") || status.eq_ignore_ascii_case("REVERTED")
+                {
+                    return Err(ChainError::Reverted { tx_hash });
+                }
+                return Err(ChainError::Ambiguous(format!(
+                    "sendTransactionSync returned status {status:?} for {tx_hash}"
+                )));
+            }
+            Ok(TxOutcome {
+                tx_hash,
+                block_number: None,
+                status: true,
+            })
+        }
+        Some("TimeoutError") => {
+            let msg = node["message"].as_str().unwrap_or("(no message)");
+            Err(ChainError::Ambiguous(format!(
+                "sendTransactionSync timed out: {msg}"
+            )))
+        }
+        Some(other) => {
+            let msg = node["message"].as_str().unwrap_or("(no message)");
+            let code = node["code"].as_str().unwrap_or("");
+            Err(ChainError::Rejected(format!("{other} {code}: {msg}")))
+        }
+        None => Err(ChainError::Decode(format!(
+            "unexpected sendTransactionSync result: {node}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only `NOT_FOUND` means no snapshot exists.
+    #[test]
+    fn only_a_missing_checkpoint_reads_as_no_snapshot() {
+        let absent = serde_json::json!({
+            "data": { "curvySyncCheckpoint": {
+                "__typename": "QueryFailedError",
+                "code": "NOT_FOUND",
+                "message": "Curvy sync checkpoint not found: latest",
+            }}
+        });
+        assert!(is_not_found(&absent, "curvySyncCheckpoint"));
+
+        for code in ["QUERY_FAILED", "CONTEXT_ERROR"] {
+            let broken = serde_json::json!({
+                "data": { "curvySyncCheckpoint": {
+                    "__typename": "QueryFailedError",
+                    "code": code,
+                    "message": "database is on fire",
+                }}
+            });
+            assert!(
+                !is_not_found(&broken, "curvySyncCheckpoint"),
+                "{code} is an outage, not an empty chain"
+            );
+            assert!(union_node(&broken, "curvySyncCheckpoint").is_err());
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_response_without_a_code_is_not_treated_as_absent() {
+        let malformed = serde_json::json!({ "data": { "curvySyncCheckpoint": null } });
+        assert!(!is_not_found(&malformed, "curvySyncCheckpoint"));
+    }
+
+    #[test]
+    fn a_sync_timeout_is_ambiguous_not_rejected() {
+        let node = serde_json::json!({
+            "__typename": "TimeoutError",
+            "code": "TIMEOUT",
+            "message": "receipt wait expired",
+        });
+        assert!(matches!(
+            sync_transaction_outcome(&node),
+            Err(ChainError::Ambiguous(_))
+        ));
+    }
+
+    #[test]
+    fn a_failed_transaction_is_a_confirmed_revert() {
+        let node = serde_json::json!({
+            "__typename": "Transaction",
+            "transactionHash": "0x1234",
+            "status": "REVERTED",
+        });
+        assert!(matches!(
+            sync_transaction_outcome(&node),
+            Err(ChainError::Reverted { tx_hash }) if tx_hash == "0x1234"
+        ));
+    }
 
     #[test]
     fn hex32_decodes_to_canonical_decimal() {
@@ -648,9 +707,13 @@ mod tests {
 
     #[test]
     fn hex32_rejects_non_hex() {
-        // The decimal shape the previous schema used must not silently pass through:
-        // `fr_from_dec` would accept it and produce a different field element.
         let row = serde_json::json!({ "a": "not-hex" });
+        assert!(hex32_field(&row, "a").is_err());
+    }
+
+    #[test]
+    fn hex32_rejects_values_wider_than_32_bytes() {
+        let row = serde_json::json!({ "a": format!("0x1{}", "0".repeat(64)) });
         assert!(hex32_field(&row, "a").is_err());
     }
 
@@ -685,7 +748,6 @@ mod tests {
 
     #[test]
     fn a_gap_or_repeat_in_leaf_indices_is_rejected() {
-        // Either would shift every later note in the tree and yield a wrong root.
         let mut skipped = vec!["11".to_string()];
         assert!(push_dense_leaf(&mut skipped, 2, "33".into()).is_err());
 

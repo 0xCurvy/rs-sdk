@@ -1,11 +1,4 @@
-//! Neutral domain types exchanged across the `curvy-chain-api` trait seams.
-//!
-//! The whole point of this crate is that **no backend type leaks through the
-//! seam**: field elements and `uint256`s ride as decimal strings ([`Dec`]) - the
-//! same boundary `curvy-core` speaks - addresses as `"0x…"` hex ([`Addr`]), and a
-//! pre-signed transaction as raw bytes ([`RawTx`]). The adapter crates
-//! (`curvy-chain-rpc`, `curvy-chain-blokli`, `curvy-abi`) translate to/from alloy;
-//! `curvy-sdk` consumes only these types + `curvy-core`, so the seam is real.
+//! Backend-neutral Curvy domain types.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,12 +47,7 @@ pub struct PendingNotesEvent {
     pub tx_hash: String,
 }
 
-/// A dense, checkpoint-pinned snapshot of the committed notes tree.
-///
-/// The alternative - folding `CommittedNotes` events and trusting their arrival order
-/// to reproduce leaf positions - makes the tree root depend on an ordering the event
-/// log never states. Here each leaf's position is served explicitly, pinned to one
-/// immutable checkpoint so pages cannot straddle a commit.
+/// A checkpoint-pinned snapshot of the committed notes tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotesTreeSnapshot {
     /// Opaque identifier of the checkpoint the leaves were read at.
@@ -96,9 +84,7 @@ pub struct GasFees {
     pub withdrawal: Dec,
 }
 
-/// The aggregator + vault fee configuration the SDK must match to build a valid
-/// aggregation (mirrors the TS SDK's `fetchAggregatorFees`). All values read from
-/// chain via [`FeeConfigSource`](../curvy_chain_api).
+/// Aggregator and vault fee configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeeConfig {
     /// `vault.depositFee()` in basis points (/10000).
@@ -139,9 +125,7 @@ pub struct OnchainNote {
     pub view_tag: u64,
 }
 
-/// A Groth16 proof in the exact on-chain calldata shape (the `pi_b` G2 coordinate
-/// swap already applied - see [`from_snarkjs`](curvy_abi)). `a`/`c` are G1 points,
-/// `b` is the swapped G2 point.
+/// Groth16 proof in on-chain calldata order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Groth16Proof {
     pub a: [Dec; 2],
@@ -149,7 +133,7 @@ pub struct Groth16Proof {
     pub c: [Dec; 2],
 }
 
-/// The aggregator's live tree state (all direct chain reads - never delegated).
+/// The aggregator's live tree state.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AggregatorState {
     pub current_notes_root: Dec,

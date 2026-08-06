@@ -1,8 +1,4 @@
-//! Direct-RPC adapters over alloy against anvil (:8545). Implements four of the five
-//! seams - [`NoteIndexSource`] (`eth_getLogs`, since blokli can't see Curvy events),
-//! [`RootAnchor`] (the trust anchor - **always** a direct read), [`FeeConfigSource`],
-//! [`BalanceReader`] - and a direct-submit [`TxSubmitter`] as the fallback path
-//! (plan risk 4). All contract access goes through `curvy-abi`'s bindings/decoders.
+//! Direct-RPC Curvy adapters built with alloy.
 
 use alloy::primitives::{Address, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
@@ -30,9 +26,13 @@ fn addr(a: &str) -> Result<Address> {
 fn u256(s: &str) -> Result<U256> {
     U256::from_str_radix(s, 10).map_err(|e| ChainError::Decode(format!("bad uint {s:?}: {e}")))
 }
+fn u256_u64(value: U256, name: &str) -> Result<u64> {
+    value
+        .try_into()
+        .map_err(|_| ChainError::Decode(format!("{name} does not fit u64: {value}")))
+}
 
-/// A direct-RPC chain client. Holds an alloy HTTP provider + the aggregator/vault
-/// addresses; implements every seam except tx-submission-via-blokli.
+/// Direct-RPC chain client.
 #[derive(Clone)]
 pub struct RpcChain {
     provider: DynProvider,
@@ -130,27 +130,21 @@ impl RootAnchor for RpcChain {
                 .await
                 .map_err(transport)?
                 .to_string(),
-            current_note_index: a
-                .currentNoteIndex()
-                .call()
-                .await
-                .map_err(transport)?
-                .try_into()
-                .unwrap_or(u64::MAX),
-            current_notes_batch_index: a
-                .currentNotesBatchIndex()
-                .call()
-                .await
-                .map_err(transport)?
-                .try_into()
-                .unwrap_or(u64::MAX),
-            current_nullifiers_batch_index: a
-                .currentNullifiersBatchIndex()
-                .call()
-                .await
-                .map_err(transport)?
-                .try_into()
-                .unwrap_or(u64::MAX),
+            current_note_index: u256_u64(
+                a.currentNoteIndex().call().await.map_err(transport)?,
+                "currentNoteIndex",
+            )?,
+            current_notes_batch_index: u256_u64(
+                a.currentNotesBatchIndex().call().await.map_err(transport)?,
+                "currentNotesBatchIndex",
+            )?,
+            current_nullifiers_batch_index: u256_u64(
+                a.currentNullifiersBatchIndex()
+                    .call()
+                    .await
+                    .map_err(transport)?,
+                "currentNullifiersBatchIndex",
+            )?,
         })
     }
     async fn is_valid_notes_root(&self, root: &Dec) -> Result<bool> {
@@ -176,13 +170,14 @@ impl FeeConfigSource for RpcChain {
         let a = self.agg();
         let v = self.vlt();
 
-        let deposit_fee_bps: u64 = v.depositFee().call().await.map_err(transport)?.to::<u64>();
-        let withdrawal_fee_bps: u64 = v
-            .withdrawalFee()
-            .call()
-            .await
-            .map_err(transport)?
-            .to::<u64>();
+        let deposit_fee = v.depositFee().call().await.map_err(transport)?;
+        let deposit_fee_bps = deposit_fee.try_into().map_err(|_| {
+            ChainError::Decode(format!("depositFee does not fit u64: {deposit_fee}"))
+        })?;
+        let withdrawal_fee = v.withdrawalFee().call().await.map_err(transport)?;
+        let withdrawal_fee_bps = withdrawal_fee.try_into().map_err(|_| {
+            ChainError::Decode(format!("withdrawalFee does not fit u64: {withdrawal_fee}"))
+        })?;
         let protocol_fee = a.protocolFeePerThousand().call().await.map_err(transport)?;
         let commitment_fee_root = a.commitmentFeeRoot().call().await.map_err(transport)?;
         let fee_pk_x = a
@@ -196,13 +191,10 @@ impl FeeConfigSource for RpcChain {
             .await
             .map_err(transport)?;
 
-        let num_tokens: u64 = v
-            .getNumberOfTokens()
-            .call()
-            .await
-            .map_err(transport)?
-            .try_into()
-            .unwrap_or(0);
+        let num_tokens = u256_u64(
+            v.getNumberOfTokens().call().await.map_err(transport)?,
+            "getNumberOfTokens",
+        )?;
         let mut per_token_gas_fees = Vec::new();
         for tid in 1..=num_tokens {
             let g = v
@@ -282,9 +274,7 @@ impl PortalDirectory for RpcChain {
     }
 }
 
-/// The direct-submit fallback: `eth_sendRawTransaction` + receipt (plan risk 4 - if
-/// blokli's validator ever tightens, the SDK swaps this `TxSubmitter` in with no other
-/// change).
+/// Submit with `eth_sendRawTransaction` and await its receipt.
 #[async_trait]
 impl TxSubmitter for RpcChain {
     async fn submit(&self, raw: &RawTx) -> Result<TxOutcome> {
@@ -292,7 +282,7 @@ impl TxSubmitter for RpcChain {
             .provider
             .send_raw_transaction(&raw.0)
             .await
-            .map_err(|e| ChainError::Rejected(e.to_string()))?;
+            .map_err(|error| ChainError::Ambiguous(error.to_string()))?;
         let receipt = pending.get_receipt().await.map_err(transport)?;
         let tx_hash = receipt.transaction_hash.to_string();
         if !receipt.status() {

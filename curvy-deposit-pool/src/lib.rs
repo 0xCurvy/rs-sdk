@@ -1,4 +1,4 @@
-//! HOPR PIX integration: `hopr_api::chain::DepositPool` implemented over `CurvyClient`.
+//! `hopr_api::chain::DepositPool` implementation over `CurvyClient`.
 
 pub mod bjj;
 pub mod pool;

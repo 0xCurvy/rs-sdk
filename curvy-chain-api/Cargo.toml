@@ -5,8 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# L2 - the load-bearing seam. Five capability traits + one error enum. No backend
-# named here; the concrete adapters (curvy-chain-rpc / curvy-chain-blokli) live at L4.
+# Backend-neutral chain capabilities.
 
 [dependencies]
 curvy-types = { path = "../curvy-types" }

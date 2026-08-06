@@ -1,6 +1,6 @@
 # rs-sdk
 
-Native Rust SDK for the Curvy PIX profiles, driven entirely through Blokli.
+Native Rust SDK for Curvy, driven through Blokli.
 
 It covers four operations end to end:
 
@@ -18,9 +18,13 @@ API. [`CurvyDepositPool`](curvy-deposit-pool/src/pool.rs) implements
 
 | what | where | why |
 |---|---|---|
-| `rs-core` checked out beside this repo | `../rs-core` | Poseidon, BabyJubJub, note commitments, indexed IMT, Groth16 prover |
-| Proving keys | `CURVY_ZK_KEYS_DIR` | too large to commit; hash-checked before parsing |
+| Rust 1.94 | `rust-toolchain.toml` | pinned; rustup installs it on first build |
+| A C compiler | `cc` on PATH | one dependency needs it, `secp256k1-sys` via `hopr-types` |
+| Proving keys | `zk-keys/v2` in this repo | 249 MB, gitignored; fetched and digest-checked automatically by any recipe that needs them |
 | A Curvy-enabled Blokli + Anvil stack | `BLOKLI_URL` | the only backend this SDK talks to |
+
+The cryptography comes from the `curvy-core`, `curvy-prover` and `curvy-witness`
+crates, pinned to `=0.1.0-rc.3`.
 
 The proving keys are **evaluation setups**, adequate for local work and not
 production trusted-setup artifacts.
@@ -30,44 +34,49 @@ production trusted-setup artifacts.
 ```bash
 export BLOKLI_URL=http://127.0.0.1:8080
 export CURVY_ADDRESSES=/absolute/path/to/curvy_deployed_addresses.json
-export CURVY_ZK_KEYS_DIR=/absolute/path/to/zk-keys/v2
 
-cargo run --release -p curvy-e2e
+just e2e
 ```
+
+Proving keys are resolved inside the repo at `zk-keys/v2` and fetched on demand, so
+there is no key path to configure. Driving cargo directly still works, and then
+`CURVY_ZK_KEYS_DIR` is yours to set.
 
 The stack must deploy verifier profiles `(2,9)` and `(10)`. Thirteen phases run:
 deposit, two aggregation fan-outs, a ten-owner withdrawal, then the four
 `DepositPool` methods. Each prints as it completes, and the summary lists every
 transaction with its label, backend and hash.
 
+See [TESTING.md](TESTING.md) for stack requirements and validation commands.
+
+`curvy-e2e --preflight` checks the artifacts, the proving keys, the address manifest
+and Blokli, submits nothing, and exits. Run it first on a machine you have not proved
+on before.
+
 Set `CURVY_E2E_SALT=<u64>` to reproduce a specific run against a fresh chain.
-Without it each run salts its own note commitments, which is what makes the flow
-re-runnable against a long-lived stack - a fixed shared secret would replay
-identical commitments and the second run would revert on spent nullifiers.
+Without it each run generates a unique note salt.
 
 ## Workspace
 
 | crate | responsibility |
 |---|---|
-| `curvy-sdk` | deposit, pending-note commit, PIX aggregation, PIX withdrawal, note sync |
+| `curvy-sdk` | deposit, pending-note commit, aggregation, withdrawal, note sync |
 | `curvy-deposit-pool` | `hopr_api::chain::DepositPool` over `CurvyClient`, with batching and persistence |
-| `curvy-witnesscalc` | PIX input ABI, authenticated artifact selection, witness calculation, Groth16 proving |
+| `curvy-witnesscalc` | circuit input assembly, artifact selection, witness calculation, Groth16 proving |
 | `curvy-chain-blokli` | Blokli GraphQL index and `sendTransactionSync` submission |
 | `curvy-chain-rpc` | direct on-chain reads and plain-transfer fallback; not on the acceptance path |
 | `curvy-chain-api`, `curvy-types` | backend-neutral seams and data types |
 | `curvy-abi` | v2 ABI bindings, raw-transaction signing, Groth16 calldata conversion |
 | `curvy-e2e` | the runnable acceptance flow |
 
-No cryptography lives here. The PIX witness modules do circuit-version assembly
-only; everything else comes from `../rs-core`.
+Cryptographic primitives and proving are provided by the `curvy-*` crates. This
+workspace assembles circuit inputs and coordinates chain operations.
 
 ## Things that will bite you
 
 **`deposit_funds_to` returns on enqueue, not on settlement.** Curvy's aggregation
 circuit takes 2 inputs and 9 regular outputs, so one proof serves seven recipients
-plus change plus a relayer note. Batching is what makes that affordable, and
-`notify_deposit` is the only honest signal that funds exist. This differs from
-`NonAnonymousDepositPool`, which awaits its transfer inline.
+plus change plus a relayer note. Use `notify_deposit` to await settlement.
 
 **Partial withdrawal delivers whole notes.** Curvy notes are atomic; splitting one
 needs an extra aggregation proof authorised by the depositor's key. Ask for an
@@ -79,31 +88,29 @@ balance fails.
 committed notes it already owns and the trait has no funding hook, so something has
 to seed it. A long-running node wants a replenishment policy.
 
-**Recovery from a crash mid-proof is deliberately manual.** Auto-recovery risks
-re-spending a note that already landed, so the pool surfaces the condition instead
-of guessing.
+**Recovery is conservative.** Lost submission responses are reconciled from direct
+note/nullifier state, and shield/commit/withdrawal stages are persisted. A hard process
+death inside aggregation proving/submission can still precede persistence of its random
+outputs; that reservation fails closed for manual reconciliation instead of risking a
+second spend.
 
 ## Output shape
 
-`VerifyPixAggregation(2, 9, 30, 6)` emits `maxOutputs + 1` notes - nine regular
+`VerifyPixAggregation(2, 9, 30, 6)` emits `maxOutputs + 1` notes: nine regular
 outputs plus the protocol fee note in its own constrained slot:
 
 | slot | note | constrained by the circuit? |
 |---|---|---|
-| 1–7 | allocations to PIX owners | no |
+| 1-7 | allocations to note owners | no |
 | 8 | change back to the spender | no |
 | 9 | relayer gas reimbursement | no |
-| 10 | protocol fee note | yes - owner is `feeNotePublicKey`, amount is `gasFee + protocolFeeQ` |
+| 10 | protocol fee note | yes; owner is `feeNotePublicKey`, amount is `gasFee + protocolFeeQ` |
 
-Only the fee note is constrained. The relayer note is an ordinary output, exactly
-as in production: the relayer trial-decrypts an aggregation's outputs, refuses to
-submit when none is addressed to it, and refuses again when the amount is below its
-live gas quote plus tolerance. That check is what makes the payment safe, not the
-proof.
+Only the fee note is constrained. A relayer must verify that an output is addressed
+to it and covers its live gas quote before submitting the transaction.
 
-The circuit charges the protocol fee on every output the spender does *not* own, so
-the relayer note is fee-bearing and `curvy-sdk` sizes the fee note accordingly - see
-`pix_value_split`.
+The protocol fee applies to every output the spender does not own, including the
+relayer note.
 
 ## Blokli is the only backend
 
@@ -119,10 +126,8 @@ test asserts no transaction reports another backend.
 | `BalanceReader` | `nativeBalance`, `transactionCount`, `chainInfo` |
 | `PortalDirectory` | `curvyEntryPortalAddress`, `curvyPortalRegistered` |
 
-This does not weaken the trust model: blokli's `curvy*` resolvers are direct
-contract reads, not indexed state, so the aggregator's notes root is still a chain
-read - merely proxied - and `sync()` reconciles the locally rebuilt tree against it
-before anything is spent.
+Blokli's `curvy*` resolvers perform direct contract reads. `sync()` reconciles the
+locally rebuilt tree against the on-chain root before spending notes.
 
 `curvy-chain-blokli` targets the `curvy-events-finalized` schema: union-wrapped
 `curvy*` queries, `Hex32` note ids converted to decimal at the adapter, and
@@ -137,24 +142,23 @@ immutable `(blockHash, noteCount, notesRoot)` and `curvySyncNotes` pages leaves
 against it, each carrying its authoritative `leafIndex`. Pages cannot straddle a
 commit, and the adapter asserts every leaf lands where it claims.
 
-`leaves_from_events` is the fallback for backends that cannot serve a snapshot - a
-plain `eth_getLogs` reader has no tree frontier to derive positions from. It is the
-weaker path: it reproduces the on-chain tree only while the index reports events in
-chain order, an assumption the event log never states, and a wrong order yields a
-wrong root rather than an error.
+`leaves_from_events` is the fallback for backends without snapshots. It requires
+events in chain order.
 
 Both reconcile against the aggregator's on-chain root before anything is spent.
 
 ## Artifacts
 
-Witness graphs for pending `(5,30)`, PIX aggregation `(2,9,30,6)`, PIX withdrawal
-`(10,30)`, and the two legacy profiles live under `artifacts/cvywit` and are
-authenticated against pinned SHA-256 digests before decoding. Proving keys are
-resolved under `CURVY_ZK_KEYS_DIR` and hash-checked before the unchecked point
-parser sees them. Wrong or stale files fail closed.
+Witness graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`,
+and two compatibility profiles live under `artifacts/signet` and are
+authenticated against pinned SHA-256 digests before decompression or decoding.
+Proving keys are resolved flat under `CURVY_ZK_KEYS_DIR` and hash-checked before the
+unchecked point parser sees them. Wrong or stale files fail closed.
 
-See [artifacts/README.md](artifacts/README.md) for the digest table and for why
-`artifacts/graphs` exists.
+They are `SIGNET01` version-1 bodies inside zstd frames, 9.5 MB bundled. A stock
+`curvy-witness` 0.1.0-rc.3 reads them with no feature flags.
+
+See [artifacts/README.md](artifacts/README.md) for digests and test fixtures.
 
 ## Local checks
 
@@ -164,21 +168,25 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-The default suite calculates both full PIX witnesses from unrelated scalar keys and
-checks every bundled graph pin. To additionally prove and self-verify every PIX-flow
-profile against the real evaluation keys:
+The default suite calculates the full aggregation and withdrawal witnesses and checks
+every bundled graph pin. To prove and self-verify every profile against the evaluation
+keys:
 
 ```bash
-CURVY_ZK_KEYS_DIR=/absolute/path/to/zk-keys/v2 \
-  cargo test --release -p curvy-witnesscalc -- --ignored --nocapture
+just test-proving
 ```
 
-`cargo test` needs a C toolchain because `circom-witnesscalc` is a dev-dependency -
-it is the independent reference the graph-equivalence tests compare against.
-`cargo build` and `cargo run` never touch it.
+`cargo test` needs `libclang` for the graph-equivalence tests. Builds also need a C
+compiler for `secp256k1-sys`.
 
-## Not implemented, deliberately
+For the acceptance flow on a separate Linux box, see [TESTING.md](TESTING.md).
+Check a machine before proving anything on it:
 
-`PixSettlement` does not exist in `hopr-api`, and idempotency by `PixAddressId`
-lives in HOPR's own strategy, which caches and tests it - `DepositPool` never
-receives an id to key on.
+```bash
+./scripts/preflight.sh
+```
+
+## API limitation
+
+`DepositPool` does not receive a `PixAddressId`, so settlement idempotency remains
+outside this adapter.

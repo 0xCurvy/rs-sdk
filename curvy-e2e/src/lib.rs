@@ -1,10 +1,4 @@
-//! Strict deposit → two PIX fan-outs → ten-owner withdrawal acceptance flow.
-//!
-//! The flow is deliberately one sequential run: each phase consumes committed state
-//! the previous phase produced, and every aggregation is a real `(2,9,30,6)` Groth16
-//! proof, so re-proving a prefix per test would cost minutes for no extra coverage.
-//! Instead of a bare pass/fail, [`run`] returns an [`E2eReport`] carrying a per-phase
-//! record (tx hashes, backend, wall time) that a reviewer can read as evidence.
+//! End-to-end deposit, aggregation, and multi-owner withdrawal flow.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -28,27 +22,15 @@ const ENTRY_SEED: &str = "0x4444444444444444444444444444444444444444444444444444
 const DESTINATION: &str = "0x000000000000000000000000000000000000bEEF";
 const ETH_TOKEN: u64 = 1;
 const FUNDING_GROSS_WEI: u128 = 2_000_000_000_000_000_000;
-const PIX_ALLOCATION_WEI: u128 = 50_000_000_000_000_000;
-const PIX_OWNER_COUNT: usize = 10;
-/// Seven allocations per proof: the `(2,9)` profile's nine regular outputs carry
-/// `7 allocations + change + relayer`, with the protocol fee note in its own slot.
+const ALLOCATION_WEI: u128 = 50_000_000_000_000_000;
+const OWNER_COUNT: usize = 10;
+/// Allocations in the first fan-out proof.
 const FIRST_FANOUT: usize = 7;
-/// Stands in for the relayer's gas reimbursement. Production sizes this from the
-/// paymaster's live quote (`gasCostInToken` plus a client buffer) and the relayer
-/// refuses to submit when the note under-covers it; on anvil the submitter pays its
-/// own gas, so any non-zero amount exercises the same output slot.
+/// Test relayer reimbursement.
 const RELAYER_REIMBURSEMENT_WEI: u128 = 1_000_000_000_000_000;
-/// The relayer is a full Curvy account, not a bare BabyJubJub owner: its note is
-/// stealth-sealed so the operator's paymaster can discover it by scanning, which is
-/// exactly what the production gate does before agreeing to relay.
+/// Test relayer account seed.
 const RELAYER_SEED: &str = "0x5555555555555555555555555555555555555555555555555555555555555555";
-/// The localnet protocol-fee collector, whose BabyJubJub key the dev deployment writes
-/// into `feeNotePublicKey`.
-///
-/// The fee note is a stealth note, so a non-zero protocol fee can only be made
-/// collectable by sealing it to this identity - the aggregator publishes the owner key
-/// but there is no on-chain channel for the collector's `S`/`V`. These are the
-/// well-known localnet dev secrets and must never appear outside a local chain.
+/// Local fee-collector keys.
 const FEE_COLLECTOR_SPEND_PRIV: &str =
     "0000000000000000000000000000000000000000000000000feec0117ec701";
 const FEE_COLLECTOR_VIEW_PRIV: &str =
@@ -65,18 +47,18 @@ pub struct Deployed {
 #[derive(Clone, Debug)]
 pub struct PhaseOutcome {
     pub name: &'static str,
-    /// What the phase established, in reviewer-facing terms.
+    /// Phase result.
     pub detail: String,
     pub elapsed: Duration,
     pub ledger: Vec<TxLedger>,
 }
 
-/// The evidence a completed run hands back: what ran, against what, and how.
+/// Completed run report.
 #[derive(Clone, Debug)]
 pub struct E2eReport {
     pub network: String,
     pub chain_id: u64,
-    /// The per-run salt that made this run's PIX note commitments unique.
+    /// Per-run note salt.
     pub salt: u64,
     pub delivered_wei: u128,
     pub phases: Vec<PhaseOutcome>,
@@ -92,14 +74,13 @@ impl E2eReport {
         self.phases.iter().flat_map(|phase| phase.ledger.iter())
     }
 
-    /// A human-readable summary - this is what a reviewer reads to decide the run
-    /// actually exercised Blokli rather than quietly falling back to direct RPC.
+    /// Format the run summary.
     pub fn summary(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "\nPIX E2E on {} (chain {}), salt {}",
+            "\nCurvy E2E on {} (chain {}), salt {}",
             self.network, self.chain_id, self.salt
         );
         let _ = writeln!(out, "{:-<74}", "");
@@ -147,8 +128,7 @@ impl Recorder {
         }
     }
 
-    /// Close the current phase. Printing as we go matters: these phases take minutes
-    /// apiece, and a reviewer watching the run needs to see progress, not a silent gap.
+    /// Close and print the current phase.
     fn finish(&mut self, name: &'static str, detail: impl Into<String>, ledger: Vec<TxLedger>) {
         let outcome = PhaseOutcome {
             name,
@@ -168,16 +148,13 @@ impl Recorder {
     }
 }
 
+/// Resolve the deployment address manifest.
 fn address_file() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("CURVY_ADDRESSES") {
         return Ok(PathBuf::from(path));
     }
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rs-core/poc/blokli-env/curvy_deployed_addresses.json"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../pix/blokli/curvy_deployed_addresses.json"),
-    ];
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [here.join("../../blokli-env/curvy_deployed_addresses.json")];
     candidates
         .into_iter()
         .find(|path| path.is_file())
@@ -190,34 +167,36 @@ pub fn deployed_addresses() -> Result<Deployed> {
         &std::fs::read(&path).with_context(|| format!("read {}", path.display()))?,
     )
     .with_context(|| format!("parse {}", path.display()))?;
-    let get = |name: &str| -> Result<String> {
-        document[name]
-            .as_str()
+    // Accept both supported deployment module names.
+    let get = |names: &[&str]| -> Result<String> {
+        names
+            .iter()
+            .find_map(|name| document[*name].as_str())
             .map(str::to_owned)
-            .with_context(|| format!("missing {name} in {}", path.display()))
+            .with_context(|| {
+                format!(
+                    "none of {} present in {}",
+                    names.join(" or "),
+                    path.display()
+                )
+            })
     };
     Ok(Deployed {
-        aggregator: get("CurvyAggregator#ERC1967Proxy")?,
-        vault: get("CurvyVault#ERC1967Proxy")?,
-        portal_factory: get("PortalFactory#PortalFactory")?,
+        aggregator: get(&["CurvyAggregator#ERC1967Proxy"])?,
+        vault: get(&["CurvyVault#ERC1967Proxy"])?,
+        portal_factory: get(&[
+            "PortalFactoryV2#PortalFactory",
+            "PortalFactory#PortalFactory",
+        ])?,
     })
 }
 
-/// blokli is the only endpoint the flow talks to; there is no direct RPC URL.
+/// Blokli endpoint.
 fn blokli_url() -> String {
     std::env::var("BLOKLI_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned())
 }
 
-/// A per-run salt for the PIX owners' shared secrets.
-///
-/// The ten allocation notes are sealed to *explicitly known* BabyJubJub owners, so
-/// nothing about them is random: `ownerHash`, `noteId` and `nullifier` are pure
-/// functions of `(owner point, shared secret, amount, token)`. With a fixed shared
-/// secret every run would replay the same note ids into the same aggregator - the
-/// second run reverts on already-committed notes and already-spent nullifiers. The
-/// salt makes each run's commitments unique so the flow is re-runnable against a
-/// long-lived stack. Set `CURVY_E2E_SALT` to replay a specific run while debugging
-/// (against a fresh chain).
+/// Resolve the per-run note salt.
 fn run_salt() -> Result<u64> {
     if let Some(value) = std::env::var_os("CURVY_E2E_SALT") {
         return value
@@ -237,25 +216,20 @@ fn amount(value: &Fr) -> Result<u128> {
         .context("field amount does not fit u128")
 }
 
-/// The ten independent BabyJubJub signing scalars the withdrawal profile authorizes
-/// each slot with. Deliberately fixed and small: these stand in for the scalar keys a
-/// PIX Exit reconstructs, and keeping them stable keeps runs comparable. Uniqueness
-/// across runs comes from the salted shared secret, not from these.
+/// Resolve a withdrawal owner key.
 fn scalar_key(index: usize) -> Result<ScalarSigningKey> {
     ScalarSigningKey::from_decimal(&(7 + index as u64).to_string())
         .map_err(|error| anyhow::anyhow!(error))
 }
 
-fn pix_owner(key: &ScalarSigningKey, index: usize, salt: u64) -> KnownOwner {
+fn allocation_owner(key: &ScalarSigningKey, index: usize, salt: u64) -> KnownOwner {
     KnownOwner::new(
         *key.verifying_key(),
         Bn254Fr::from_fr(Fr::from(salt.wrapping_add(index as u64))),
     )
 }
 
-/// Hash-check every graph and proving key the flow will need, before any chain state
-/// is touched. Without this a missing `CURVY_ZK_KEYS_DIR` only surfaces after the
-/// deposit and first commitment have already been submitted.
+/// Authenticate all required artifacts.
 fn preflight_artifacts() -> Result<()> {
     for circuit in curvy_sdk::curvy_witnesscalc::Circuit::pix_flow() {
         circuit
@@ -263,6 +237,83 @@ fn preflight_artifacts() -> Result<()> {
             .with_context(|| format!("{} artifacts are not usable", circuit.label))?;
     }
     Ok(())
+}
+
+/// Validated flow dependencies.
+#[derive(Clone, Debug)]
+pub struct Preflight {
+    pub blokli_url: String,
+    pub network: String,
+    pub chain_id: u64,
+    pub addresses: PathBuf,
+    pub aggregator: String,
+    pub vault: String,
+    pub portal_factory: String,
+    /// Authenticated graph and proving-key paths by circuit.
+    pub artifacts: Vec<(String, PathBuf, PathBuf)>,
+}
+
+impl Preflight {
+    /// Format the preflight summary.
+    pub fn summary(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "blokli    {} ({}, chain {})",
+            self.blokli_url, self.network, self.chain_id
+        );
+        let _ = writeln!(out, "addresses {}", self.addresses.display());
+        let _ = writeln!(out, "  aggregator     {}", self.aggregator);
+        let _ = writeln!(out, "  vault          {}", self.vault);
+        let _ = writeln!(out, "  portalFactory  {}", self.portal_factory);
+        for (label, graph, zkey) in &self.artifacts {
+            let _ = writeln!(out, "{label}");
+            let _ = writeln!(out, "  graph  {}", graph.display());
+            let _ = writeln!(out, "  zkey   {}", zkey.display());
+        }
+        out
+    }
+}
+
+/// Validate flow dependencies without submitting transactions.
+pub async fn preflight() -> Result<Preflight> {
+    let blokli_url = blokli_url();
+
+    let mut artifacts = Vec::new();
+    for circuit in curvy_sdk::curvy_witnesscalc::Circuit::pix_flow() {
+        circuit
+            .verify_artifacts()
+            .with_context(|| format!("{} artifacts are not usable", circuit.label))?;
+        artifacts.push((
+            circuit.label.to_owned(),
+            circuit.graph_path(),
+            circuit.zkey_path()?,
+        ));
+    }
+
+    let addresses = address_file()?;
+    let deployed = deployed_addresses()?;
+
+    let blokli = BlokliChain::new(&blokli_url);
+    if !blokli.is_ready().await {
+        bail!("Blokli is not ready at {blokli_url}");
+    }
+    let (network, chain_id) = blokli.chain_info().await?;
+    if chain_id != 31_337 {
+        bail!("unexpected chain id {chain_id}; expected 31337");
+    }
+
+    Ok(Preflight {
+        blokli_url,
+        network,
+        chain_id,
+        addresses,
+        aggregator: deployed.aggregator,
+        vault: deployed.vault,
+        portal_factory: deployed.portal_factory,
+        artifacts,
+    })
 }
 
 async fn commit_notes(
@@ -301,7 +352,7 @@ async fn wait_for_nullifiers(blokli: &BlokliChain, wanted: &HashSet<String>) -> 
         }
     })
     .await
-    .context("timed out waiting for Blokli's PIX nullifier index")??;
+    .context("timed out waiting for Blokli's nullifier index")??;
     Ok(())
 }
 
@@ -312,7 +363,7 @@ pub async fn run() -> Result<E2eReport> {
     let blokli_url = blokli_url();
     let salt = run_salt()?;
 
-    // ── 1. preflight ───────────────────────────────────────────────────────────
+    // Preflight.
     preflight_artifacts()?;
     let deployed = deployed_addresses()?;
     let blokli = Arc::new(BlokliChain::new(&blokli_url));
@@ -323,10 +374,7 @@ pub async fn run() -> Result<E2eReport> {
     if chain_id != 31_337 {
         bail!("unexpected chain id {chain_id}; expected 31337");
     }
-    // Every seam is blokli: submission, the event index, the trust anchor, fees,
-    // balances and portal derivation. Nothing here opens a direct RPC connection -
-    // blokli's `curvy*` resolvers still perform real `eth_call`s, so the aggregator
-    // state remains a chain read rather than indexed state; it is merely proxied.
+    // Use Blokli for all chain access.
     let client = Arc::new(CurvyClient::new(
         blokli.clone(),
         blokli.clone(),
@@ -345,19 +393,20 @@ pub async fn run() -> Result<E2eReport> {
         Vec::new(),
     );
 
-    // ── 2. deposit ─────────────────────────────────────────────────────────────
-    let entry = Account::from_raw_private_key(ENTRY_SEED)?;
-    let (funding, deposit_ledger) = client
-        .deposit(
-            &entry,
-            FUNDING_GROSS_WEI,
-            ETH_TOKEN,
-            OPERATOR_PRIVATE_KEY,
-            OPERATOR_ADDRESS,
-            Route::Blokli,
-            Route::Blokli,
-        )
+    // Deposit.
+    let entry = Account::from_poc_raw_private_key(ENTRY_SEED)?;
+    let prepared = client
+        .prepare_deposit(&entry, FUNDING_GROSS_WEI, ETH_TOKEN, OPERATOR_ADDRESS)
         .await?;
+    let deposit_ledger = vec![
+        client
+            .fund_prepared_deposit(&prepared, OPERATOR_PRIVATE_KEY, Route::Blokli)
+            .await?,
+        client
+            .shield_prepared_deposit(&prepared, OPERATOR_PRIVATE_KEY, Route::Blokli)
+            .await?,
+    ];
+    let funding = prepared.note;
     if deposit_ledger.len() != 2 || deposit_ledger.iter().any(|row| row.backend != "blokli") {
         bail!("deposit did not submit both transactions through Blokli");
     }
@@ -374,31 +423,29 @@ pub async fn run() -> Result<E2eReport> {
         ledger,
     );
 
-    let keys = (0..PIX_OWNER_COUNT)
+    let keys = (0..OWNER_COUNT)
         .map(scalar_key)
         .collect::<Result<Vec<_>>>()?;
     let owners = keys
         .iter()
         .enumerate()
-        .map(|(index, key)| pix_owner(key, index, salt))
+        .map(|(index, key)| allocation_owner(key, index, salt))
         .collect::<Vec<_>>();
 
-    // The relayer is a distinct account, not one of the ten withdrawal owners: its
-    // note reimburses gas and is never withdrawn by this flow.
-    let relayer_account = Account::from_raw_private_key(RELAYER_SEED)?;
+    // Relayer reimbursement output.
+    let relayer_account = Account::from_poc_raw_private_key(RELAYER_SEED)?;
     let relayer_identity = relayer_account.identity();
     let relayer = Some((&relayer_identity, RELAYER_REIMBURSEMENT_WEI));
 
-    // Without this the protocol fee note is sealed to a random secret and the fee is
-    // burned; the aggregation refuses to build rather than silently destroy it.
+    // Protocol fee recipient.
     let fee_collector = Account::from_meta_keys(FEE_COLLECTOR_SPEND_PRIV, FEE_COLLECTOR_VIEW_PRIV)?;
     let fee_identity = fee_collector.identity();
 
-    // ── 3. first aggregation: profile (2,9) ────────────────────────────────────
+    // First aggregation.
     let first_allocations = owners[..FIRST_FANOUT]
         .iter()
         .copied()
-        .map(|owner| (owner, PIX_ALLOCATION_WEI))
+        .map(|owner| (owner, ALLOCATION_WEI))
         .collect::<Vec<_>>();
     let first = client
         .aggregate_pix_allocations(
@@ -412,10 +459,10 @@ pub async fn run() -> Result<E2eReport> {
         )
         .await?;
     if first.emitted_notes.len() != 10 || first.ledger[0].backend != "blokli" {
-        bail!("first PIX aggregation did not emit ten notes through Blokli");
+        bail!("first aggregation did not emit ten notes through Blokli");
     }
     if first.relayer.is_none() {
-        bail!("first PIX aggregation did not emit the relayer note");
+        bail!("first aggregation did not emit the relayer note");
     }
     record.finish(
         "aggregate (2,9) - 7 allocations",
@@ -427,10 +474,7 @@ pub async fn run() -> Result<E2eReport> {
     first_to_commit.push(&first.change);
     let ledger = commit_notes(&client, &first_to_commit, OPERATOR_PRIVATE_KEY).await?;
 
-    // Reproduce the production paymaster gate: a relayer only agrees to submit an
-    // aggregation after it DISCOVERS an output note addressed to itself and checks the
-    // amount covers its gas quote. Discovery is stealth trial-decryption, so this also
-    // proves the note was sealed as an announcement rather than to a bare owner point.
+    // Verify relayer-note discovery.
     let discovered = client.scan(&relayer_account).await?;
     let reimbursement = discovered
         .iter()
@@ -449,11 +493,11 @@ pub async fn run() -> Result<E2eReport> {
         ledger,
     );
 
-    // ── 4. second aggregation: profile (2,9) from the committed change ─────────
+    // Second aggregation.
     let second_allocations = owners[FIRST_FANOUT..]
         .iter()
         .copied()
-        .map(|owner| (owner, PIX_ALLOCATION_WEI))
+        .map(|owner| (owner, ALLOCATION_WEI))
         .collect::<Vec<_>>();
     let second = client
         .aggregate_pix_allocations(
@@ -467,7 +511,7 @@ pub async fn run() -> Result<E2eReport> {
         )
         .await?;
     if second.emitted_notes.len() != 10 || second.ledger[0].backend != "blokli" {
-        bail!("second PIX aggregation did not emit ten notes through Blokli");
+        bail!("second aggregation did not emit ten notes through Blokli");
     }
     record.finish(
         "aggregate (2,9) - 3 allocations",
@@ -490,17 +534,14 @@ pub async fn run() -> Result<E2eReport> {
         ledger,
     );
 
-    // ── 5. withdrawal: profile (10), ten unrelated scalar owners ───────────────
+    // Multi-owner withdrawal.
     let notes = first
         .allocations
         .iter()
         .chain(second.allocations.iter())
         .collect::<Vec<_>>();
-    if notes.len() != PIX_OWNER_COUNT {
-        bail!(
-            "expected ten real PIX allocation notes, got {}",
-            notes.len()
-        );
+    if notes.len() != OWNER_COUNT {
+        bail!("expected ten allocation notes, got {}", notes.len());
     }
     let spends = keys
         .iter()
@@ -525,7 +566,7 @@ pub async fn run() -> Result<E2eReport> {
     if withdrawal_ledger[0].backend != "blokli" || after.saturating_sub(before) != delivered {
         bail!("withdrawal balance delta or submission backend is incorrect");
     }
-    if delivered >= PIX_ALLOCATION_WEI * PIX_OWNER_COUNT as u128 {
+    if delivered >= ALLOCATION_WEI * OWNER_COUNT as u128 {
         bail!("withdrawal did not deduct the configured fee/gas");
     }
     record.finish(
@@ -534,7 +575,7 @@ pub async fn run() -> Result<E2eReport> {
         withdrawal_ledger,
     );
 
-    // ── 6. the index agrees ────────────────────────────────────────────────────
+    // Indexed nullifiers.
     wait_for_nullifiers(&blokli, &expected_nullifiers).await?;
     record.finish(
         "verify indexed nullifiers",
@@ -542,7 +583,7 @@ pub async fn run() -> Result<E2eReport> {
         Vec::new(),
     );
 
-    // ── 7. the interface HOPR actually consumes ────────────────────────────────
+    // Deposit-pool interface.
     run_deposit_pool_phase(
         Arc::clone(&client),
         &entry,
@@ -561,20 +602,12 @@ pub async fn run() -> Result<E2eReport> {
     })
 }
 
-/// Number of PIX deposit addresses the pool phase serves. Below the seven-allocation
-/// batch limit so the flush is driven explicitly rather than by hitting the threshold -
-/// the interesting case, since a partial batch is what a real node usually holds.
+/// Deposit addresses served by the pool phase.
 const POOL_DEPOSIT_COUNT: usize = 4;
 /// Value allocated to each pool deposit address.
 const POOL_DEPOSIT_WEI: u128 = 20_000_000_000_000_000;
 
-/// Drive `CurvyDepositPool` through the real `DepositPool` trait.
-///
-/// The rest of the flow calls `CurvyClient` directly, which proves the circuits and
-/// Blokli forwarding but says nothing about the interface HOPR will actually use. This
-/// phase exercises that interface end to end: HOPR-shaped BabyJubJub deposit addresses
-/// in, one aggregation proof serving all of them, then a single ten-input withdrawal
-/// proof sweeping them back out.
+/// Exercise `CurvyDepositPool` through the `DepositPool` trait.
 async fn run_deposit_pool_phase(
     client: Arc<CurvyClient>,
     spender: &Account,
@@ -600,7 +633,7 @@ async fn run_deposit_pool_phase(
         Arc::new(MemoryStore::default()),
     )?);
 
-    // Fund the pool from a fresh shield so it owns a committed note to allocate from.
+    // Fund the pool.
     let funding_ledger = pool
         .fund_from_deposit(
             FUNDING_GROSS_WEI / 2,
@@ -617,8 +650,7 @@ async fn run_deposit_pool_phase(
         funding_ledger,
     );
 
-    // HOPR hands us BabyJubJub deposit addresses; the matching secrets are what the
-    // Exit later reconstructs to withdraw. Salted so reruns cannot collide.
+    // Build deposit addresses and matching secrets.
     let mut secrets = Vec::with_capacity(POOL_DEPOSIT_COUNT);
     let mut addresses = Vec::with_capacity(POOL_DEPOSIT_COUNT);
     for index in 0..POOL_DEPOSIT_COUNT {
@@ -634,7 +666,7 @@ async fn run_deposit_pool_phase(
         pool.deposit_funds_to(*address, HoprBalance::from(POOL_DEPOSIT_WEI))
             .await?;
     }
-    // Enqueued, not yet proved: a partial batch needs an explicit flush.
+    // Flush the partial batch.
     let allocation_ledger = pool.flush_pending().await?;
     record.finish(
         "pool: deposit_funds_to",
@@ -642,8 +674,7 @@ async fn run_deposit_pool_phase(
         allocation_ledger,
     );
 
-    // `notify_deposit` is the trait's only honest arrival signal; each must already be
-    // resolvable now that the proof and its commitment have landed.
+    // Notify the pool after commitment.
     for address in &addresses {
         let notified = pool
             .notify_deposit(*address, HoprBalance::from(POOL_DEPOSIT_WEI))
@@ -661,7 +692,7 @@ async fn run_deposit_pool_phase(
         Vec::new(),
     );
 
-    // The batching override: every deposit swept in one (10,30) proof.
+    // Sweep every deposit in one proof.
     let before = client.eth_balance(DESTINATION).await?;
     let destination: hopr_types::primitive::prelude::Address = DESTINATION
         .parse()
@@ -681,7 +712,7 @@ async fn run_deposit_pool_phase(
     if after <= before {
         bail!("pool withdrawal did not increase the destination balance");
     }
-    // Each address is emptied, so nothing may remain recorded as spendable.
+    // Confirm each address is empty.
     for address in &addresses {
         if !pool.deposits_for(address).is_empty() {
             bail!("a swept deposit address still records spendable notes");
@@ -702,10 +733,7 @@ async fn run_deposit_pool_phase(
 mod tests {
     use super::*;
 
-    /// The circuit constrains the fee note's owner to the aggregator's
-    /// `feeNotePublicKey`, so the collector identity the flow seals to must derive
-    /// exactly that key - otherwise every aggregation fails at proving time with an
-    /// unsatisfiable constraint rather than anything that names the cause.
+    /// The configured fee collector must match the on-chain key.
     #[test]
     fn the_fee_collector_identity_owns_the_dev_fee_note_public_key() {
         const DEV_FEE_NOTE_PUBLIC_KEY_X: &str =

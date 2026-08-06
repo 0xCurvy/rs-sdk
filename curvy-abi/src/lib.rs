@@ -1,13 +1,4 @@
-//! alloy bindings + calldata/signing/decoding for the deployed Curvy contracts.
-//!
-//! The four `sol!` modules ([`bindings`]) are generated at compile time from the
-//! VENDORED `abi/*.abi.json` files (see `abi/README.md`) - the circuit repository is never read at
-//! build or run time. Everything the SDK calls here speaks NEUTRAL types
-//! (`curvy-types` decimal strings / `RawTx`), so `curvy-sdk` never names alloy.
-//!
-//! [`Groth16Proof::from_snarkjs`]
-//! applies the `pi_b` G2 coordinate swap the on-chain pairing precompile expects
-//! (get it wrong → off-chain verify passes but on-chain reverts).
+//! Curvy contract bindings, calldata, signing and event decoding.
 
 use alloy::primitives::{Address, U256};
 use anyhow::{Context, Result};
@@ -16,11 +7,7 @@ use curvy_types::{
     PendingNotesEvent, RawTx,
 };
 
-/// The generated contract bindings, re-exported for `curvy-chain-rpc`'s typed reads.
-///
-/// Each contract lives in its own submodule: `sol!` hoists shared library structs
-/// (`CurvyTypes.Note`, `CurvyTypes.GasFees`, …) into the *parent* module, so keeping
-/// them separate avoids cross-contract name collisions.
+/// Generated contract bindings grouped by contract.
 pub mod bindings {
     pub mod aggregator {
         alloy::sol! {
@@ -58,7 +45,7 @@ pub mod bindings {
 
 use alloy::sol_types::SolCall;
 
-// ── decimal-string ⇄ U256 helpers (the neutral boundary) ───────────────────────
+// Decimal and U256 conversion.
 
 /// Parse a non-negative decimal string into `U256`.
 pub fn u256_dec(s: &str) -> Result<U256> {
@@ -68,12 +55,9 @@ fn u256_arr2(a: &[Dec; 2]) -> Result<[U256; 2]> {
     Ok([u256_dec(&a[0])?, u256_dec(&a[1])?])
 }
 
-// ── snarkjs proof JSON → on-chain proof (the G2 swap) ──────────────────────────
+// Proof conversion.
 
-/// Convert a snarkjs-shaped proof JSON + public-signals JSON into the on-chain proof
-/// shape. `pi_a`/`pi_c` (G1) pass through; each `pi_b` (G2) coordinate pair is
-/// swapped `[c0,c1] → [c1,c0]` - the Ethereum pairing precompile convention that
-/// `snarkjs generatecall` encodes. Public signals pass through in witness order.
+/// Convert snarkjs proof JSON into the on-chain proof shape.
 pub fn proof_from_snarkjs(proof_json: &str) -> Result<Groth16Proof> {
     let p: serde_json::Value = serde_json::from_str(proof_json).context("parse snarkjs proof")?;
     let g1 = |v: &serde_json::Value, i: usize| -> Result<Dec> {
@@ -105,7 +89,7 @@ fn proof_to_u256(p: &Groth16Proof) -> Result<SolidityProof> {
     ))
 }
 
-// ── calldata encoders (neutral in → raw calldata bytes) ────────────────────────
+// Calldata encoders.
 
 /// `PortalFactory.deployShieldPortal(note, recovery)` calldata.
 pub fn encode_deploy_shield_portal(note: &OnchainNote, recovery: &str) -> Result<Vec<u8>> {
@@ -202,7 +186,7 @@ pub fn encode_commit_pending_notes(
     )
 }
 
-// ── local raw-tx signer (caller holds the key; nothing touches the network) ─────
+// Raw transaction signing.
 
 use alloy::consensus::SignableTransaction;
 use alloy::network::TxSignerSync;
@@ -221,10 +205,7 @@ pub struct CallTx<'a> {
     pub chain_id: u64,
 }
 
-/// Build a legacy (EIP-155) transaction, sign it locally, and
-/// return the EIP-2718-encoded raw bytes - exactly what blokli `sendTransactionSync`
-/// / `eth_sendRawTransaction` take. Purely local: nonce/gas/gas_price are supplied by
-/// the caller (read via `BalanceReader`), so no provider is needed here.
+/// Sign a legacy EIP-155 transaction and return EIP-2718 bytes.
 pub fn sign_call_tx(call: CallTx<'_>) -> Result<RawTx> {
     use alloy::consensus::TxLegacy;
     use alloy::eips::eip2718::Encodable2718;
@@ -255,18 +236,18 @@ pub fn address_of(priv_key_hex: &str) -> Result<String> {
     Ok(signer.address().to_string())
 }
 
-// ── event decoders (alloy log → neutral curvy-types events) ────────────────────
+// Event decoders.
 
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 
-fn block_of(log: &Log) -> u64 {
-    log.block_number.unwrap_or_default()
+fn block_of(log: &Log) -> Result<u64> {
+    log.block_number.context("log has no block number")
 }
-fn tx_hash_of(log: &Log) -> String {
+fn tx_hash_of(log: &Log) -> Result<String> {
     log.transaction_hash
         .map(|h| h.to_string())
-        .unwrap_or_default()
+        .context("log has no transaction hash")
 }
 
 /// Decode a `PendingNotes` log.
@@ -283,8 +264,8 @@ pub fn decode_pending_notes(log: &Log) -> Result<PendingNotesEvent> {
         tokens: d.tokens.iter().map(|x| x.to_string()).collect(),
         amounts: d.amounts.iter().map(|x| x.to_string()).collect(),
         is_plaintext: d.isPlaintext.clone(),
-        block_number: block_of(log),
-        tx_hash: tx_hash_of(log),
+        block_number: block_of(log)?,
+        tx_hash: tx_hash_of(log)?,
     })
 }
 
@@ -294,9 +275,12 @@ pub fn decode_committed_notes(log: &Log) -> Result<CommittedNotesEvent> {
         bindings::aggregator::CurvyAggregatorAlphaV2::CommittedNotes::decode_log_data(log.data())
             .context("decode CommittedNotes")?;
     Ok(CommittedNotesEvent {
-        batch_index: d.batchIndex.try_into().unwrap_or(u64::MAX),
+        batch_index: d
+            .batchIndex
+            .try_into()
+            .context("batchIndex does not fit u64")?,
         note_ids: d.noteIds.iter().map(|x| x.to_string()).collect(),
-        block_number: block_of(log),
+        block_number: block_of(log)?,
     })
 }
 
@@ -307,9 +291,12 @@ pub fn decode_committed_nullifiers(log: &Log) -> Result<CommittedNullifiersEvent
     )
     .context("decode CommittedNullifiers")?;
     Ok(CommittedNullifiersEvent {
-        batch_index: d.batchIndex.try_into().unwrap_or(u64::MAX),
+        batch_index: d
+            .batchIndex
+            .try_into()
+            .context("batchIndex does not fit u64")?,
         nullifiers: d.nullifiers.iter().map(|x| x.to_string()).collect(),
-        block_number: block_of(log),
+        block_number: block_of(log)?,
     })
 }
 

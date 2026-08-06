@@ -5,10 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# L4 - the direct-RPC adapters over alloy against anvil: NoteIndexSource (eth_getLogs),
-# RootAnchor (the trust anchor - always a direct read), FeeConfigSource, BalanceReader,
-# plus a direct-submit TxSubmitter as the fallback path (plan risk 4). Uses curvy-abi's
-# sol! bindings + event decoders.
+# Direct-RPC adapters and transaction submission.
 
 [dependencies]
 curvy-chain-api = { path = "../curvy-chain-api" }

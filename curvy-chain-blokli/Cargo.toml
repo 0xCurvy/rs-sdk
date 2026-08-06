@@ -5,9 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# L4 - the blokli TxSubmitter adapter. A ~1-file reqwest GraphQL client against
-# bloklid :8080 `sendTransactionSync(conf=1)` (ported/hardened from blokli-smoke),
-# with clean typed errors for the union results (RpcError / validator rejections).
+# Blokli GraphQL adapters.
 
 [dependencies]
 curvy-chain-api = { path = "../curvy-chain-api" }

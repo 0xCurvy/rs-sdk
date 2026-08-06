@@ -1,15 +1,7 @@
-//! The remaining chain-access seams served by blokli, so it is the SDK's only
-//! backend: [`RootAnchor`], [`FeeConfigSource`], [`BalanceReader`] and
-//! [`PortalDirectory`].
-//!
-//! Each of these is a *direct contract read* on blokli's side (`curvy*` resolvers call
-//! the chain, they do not serve indexed state), so routing them through blokli does
-//! not weaken the trust model the way delegating the notes root to an indexer would:
-//! the aggregator state still comes from a real `eth_call`, just proxied.
+//! Blokli-backed contract-read adapters.
 //!
 //! ## Encodings
-//! The schema is deliberately not uniform, and every mismatch here is a runtime bug
-//! rather than a compile error, so the conversions are centralised:
+//! Wire conversions are centralized here:
 //!
 //! | wire type | example fields | this seam wants |
 //! |---|---|---|
@@ -24,7 +16,7 @@ use curvy_chain_api::{
 use curvy_types::{Addr, AggregatorState, Dec, FeeConfig, GasFees};
 use num_bigint::BigUint;
 
-use crate::{BlokliChain, hex32_field, string_field, u64_field, union_node};
+use crate::{BlokliChain, hex32_field, is_not_found, string_field, u64_field, union_node};
 
 const AGGREGATOR_STATE_QUERY: &str = r#"
 query {
@@ -145,13 +137,7 @@ fn dec_to_hex32(value: &Dec) -> Result<String> {
     Ok(format!("0x{hex:0>64}"))
 }
 
-/// Convert blokli's human-readable `TokenValueString` into base units (wei).
-///
-/// `nativeBalance.balance` arrives as `"<amount> <currency>"` where the amount is
-/// explicitly *not* wei - `Balance::amount_in_base_units` scales by the currency's 18
-/// decimals and trims trailing zeros. Rescaling is exact (18 decimals covers every wei
-/// digit), and it must be, because the acceptance flow asserts an exact wei delta
-/// across a withdrawal.
+/// Convert `TokenValueString` into wei.
 fn token_value_to_wei(raw: &str) -> Result<Dec> {
     let amount = raw.split_whitespace().next().unwrap_or_default();
     if amount.is_empty() {
@@ -249,7 +235,7 @@ impl FeeConfigSource for BlokliChain {
             })
         };
 
-        // Token ids are 1-based and dense, matching the Vault's own registration order.
+        // Skip deregistered token ids and propagate other errors.
         let count = uint256_u64(token_count, "count")?;
         let mut per_token_gas_fees = Vec::with_capacity(count as usize);
         for token_id in 1..=count {
@@ -259,7 +245,11 @@ impl FeeConfigSource for BlokliChain {
                     serde_json::json!({ "tokenId": token_id.to_string() }),
                 )
                 .await?;
-            let node = union_node(&token, "curvyVaultToken")?;
+            let node = match union_node(&token, "curvyVaultToken") {
+                Ok(node) => node,
+                Err(_) if is_not_found(&token, "curvyVaultToken") => continue,
+                Err(error) => return Err(error),
+            };
             let gas_fees = node.get("gasFees").ok_or_else(|| {
                 ChainError::Decode(format!("curvyVaultToken has no gasFees: {node}"))
             })?;
@@ -315,7 +305,7 @@ impl BalanceReader for BlokliChain {
     async fn gas_price(&self) -> Result<u128> {
         let response = self.gql(GAS_AND_CHAIN_QUERY, serde_json::json!({})).await?;
         let node = &response["data"]["chainInfo"];
-        // Optional on the wire: the estimate comes from a live RPC call that can fail.
+        // Gas price is optional on the wire.
         node["gasPrice"]
             .as_str()
             .ok_or_else(|| {
@@ -377,8 +367,6 @@ mod tests {
 
     #[test]
     fn dec_to_hex32_pads_to_the_scalar_width() {
-        // Hex32 validates the length server-side, so a short encoding is rejected
-        // before it ever reaches the contract.
         assert_eq!(dec_to_hex32(&"0".to_string()).unwrap().len(), 66);
     }
 
@@ -391,8 +379,6 @@ mod tests {
 
     #[test]
     fn token_value_rescales_to_exact_wei() {
-        // blokli renders base units and trims trailing zeros, so the same balance can
-        // arrive in several shapes; all must land on the identical wei figure.
         assert_eq!(token_value_to_wei("2 xDai").unwrap(), "2000000000000000000");
         assert_eq!(
             token_value_to_wei("2.5 xDai").unwrap(),
@@ -403,8 +389,6 @@ mod tests {
 
     #[test]
     fn token_value_keeps_single_wei_precision() {
-        // The acceptance flow asserts an exact wei delta, so the smallest unit must
-        // survive the round trip rather than being rounded away.
         assert_eq!(
             token_value_to_wei("0.000000000000000001 xDai").unwrap(),
             "1"

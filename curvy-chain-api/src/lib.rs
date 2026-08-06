@@ -1,18 +1,14 @@
-//! The Curvy chain-access seam: five capability traits, split **by capability**
-//! because no single backend covers them all today.
+//! Backend-neutral traits for Curvy chain access.
 //!
-//! | trait | PoC backend | why split |
-//! |---|---|---|
-//! | [`TxSubmitter`]      | blokli GraphQL (primary) / direct RPC (fallback) | blokli relays today; validator may tighten (risk 4) |
-//! | [`NoteIndexSource`]  | blokli GraphQL / direct `eth_getLogs` fallback    | keeps the SDK independent of index transport |
-//! | [`RootAnchor`]       | **always** a direct chain read                   | the trust anchor is never delegated to an indexer |
-//! | [`FeeConfigSource`]  | direct chain reads                               | mirrors the TS `fetchAggregatorFees` |
-//! | [`BalanceReader`]    | direct chain reads                               | nonce/gas-price/balances for tx building & asserts |
+//! | trait | implementations |
+//! |---|---|
+//! | [`TxSubmitter`] | Blokli GraphQL or direct RPC |
+//! | [`NoteIndexSource`] | Blokli GraphQL or `eth_getLogs` |
+//! | [`RootAnchor`] | direct contract read |
+//! | [`FeeConfigSource`] | direct contract reads |
+//! | [`BalanceReader`] | direct contract reads |
 //!
-//! Everything is `#[async_trait]`; the crypto/proving stays synchronous in the SDK
-//! (run under `spawn_blocking`). Types crossing the seam live in `curvy-types` - no
-//! alloy or reqwest type is ever named here, so `curvy-sdk` (which depends on this
-//! crate, not on any adapter) stays backend-agnostic.
+//! Shared types live in `curvy-types`; transport-specific types stay in adapters.
 
 use async_trait::async_trait;
 use curvy_types::{
@@ -20,16 +16,17 @@ use curvy_types::{
     NotesTreeSnapshot, PendingNotesEvent, RawTx, TxOutcome,
 };
 
-/// A typed chain error. Adapters map their backend-specific failures (RPC errors,
-/// blokli union rejections, decode failures) onto these variants so the SDK sees one
-/// error model (plan risk 9).
+/// A backend-neutral chain error.
 #[derive(Debug, thiserror::Error)]
 pub enum ChainError {
     /// The backend transport failed (HTTP/RPC/connection).
     #[error("transport: {0}")]
     Transport(String),
-    /// The submitted transaction was rejected before mining (blokli RpcError, validator
-    /// rejection, revert-on-estimate, bad-hex, …). Carries the backend's message.
+    /// The raw transaction crossed the submission boundary, but the backend could not
+    /// say whether it accepted/mined it (for example a sync-relay timeout).
+    #[error("submission outcome unknown: {0}")]
+    Ambiguous(String),
+    /// The submitted transaction was rejected before mining.
     #[error("submission rejected: {0}")]
     Rejected(String),
     /// A submitted transaction mined but reverted.
@@ -45,9 +42,7 @@ pub enum ChainError {
 
 pub type Result<T> = std::result::Result<T, ChainError>;
 
-/// Submit a pre-signed raw transaction and wait for `confirmations` (1 on
-/// anvil-localhost). The caller holds all keys and pays gas; the submitter never
-/// signs. blokli's `sendTransactionSync` and direct `eth_sendRawTransaction` both fit.
+/// Submit a pre-signed raw transaction and wait for confirmation.
 #[async_trait]
 pub trait TxSubmitter: Send + Sync {
     async fn submit(&self, raw: &RawTx) -> Result<TxOutcome>;
@@ -56,8 +51,7 @@ pub trait TxSubmitter: Send + Sync {
     fn backend(&self) -> &'static str;
 }
 
-/// Read Curvy's append-only note/nullifier event log. The PIX acceptance path uses
-/// Blokli's persisted GraphQL history; direct `eth_getLogs` remains a fallback adapter.
+/// Read Curvy's append-only note and nullifier event logs.
 #[async_trait]
 pub trait NoteIndexSource: Send + Sync {
     async fn pending_notes(&self, from_block: u64, to_block: u64)
@@ -79,19 +73,13 @@ pub trait NoteIndexSource: Send + Sync {
     /// A dense, checkpoint-pinned snapshot of the committed notes tree, when the
     /// backend can serve one.
     ///
-    /// `Ok(None)` means "fold the event log instead" - the default, and what a plain
-    /// `eth_getLogs` backend must answer, since deriving leaf positions is only
-    /// possible from an index that tracks the tree frontier. Preferring the snapshot
-    /// removes the caller's dependence on reconstructing leaf order from event
-    /// arrival order; both paths still reconcile against the on-chain root, so this
-    /// is a robustness improvement rather than a change of trust model.
+    /// `Ok(None)` instructs the caller to fold the event log instead.
     async fn notes_tree_snapshot(&self) -> Result<Option<NotesTreeSnapshot>> {
         Ok(None)
     }
 }
 
-/// The trust anchor: the aggregator's on-chain notes-tree state. **Always** a direct
-/// chain read - never delegated to an indexer (mirrors the TS `rpcRootVerifier` seam).
+/// The aggregator's on-chain notes-tree state.
 #[async_trait]
 pub trait RootAnchor: Send + Sync {
     async fn state(&self) -> Result<AggregatorState>;
@@ -101,8 +89,7 @@ pub trait RootAnchor: Send + Sync {
     async fn note_status(&self, note_id: &Dec) -> Result<u8>;
 }
 
-/// Read the fee/gas configuration the SDK must match to build a valid aggregation
-/// (mirrors the TS `fetchAggregatorFees`).
+/// Read the fee configuration required to build an aggregation.
 #[async_trait]
 pub trait FeeConfigSource: Send + Sync {
     async fn fees(&self) -> Result<FeeConfig>;

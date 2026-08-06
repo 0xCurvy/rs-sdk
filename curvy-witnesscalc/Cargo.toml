@@ -5,12 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# Witness-calculator seam. One
-# `WitnessCalculator` trait + a graph-based pure-Rust impl (Curvy's own `curvy-witness`
-# CVYWIT01 evaluator); per-circuit graph/zkey artifacts pinned by sha256; the interim
-# `build_pending_commitment` input massaging (documented as the stopgap for the core
-# `to_circuit_input()` fix).
-# Depends on curvy-prover for the Groth16 leg - one crate turns (input JSON) → (proof).
+# Witness generation and Groth16 proving.
 
 [dependencies]
 curvy-core = { workspace = true }
@@ -25,13 +20,7 @@ hex = { workspace = true }
 anyhow = { workspace = true }
 num-bigint = { workspace = true }
 
-# Test-only. The equivalence gate in `tests/pix_profiles.rs` runs both evaluators over
-# the same input and compares every signal; that is the evidence the CVYWIT graphs are
-# faithful. It stays out of `[dependencies]` because it needs `bindgen`/`clang`, which
-# the SDK's Nix and bare-Linux targets do not have.
-#
-# `sage` and `signet` are likewise dev-only: they put SAGE and the version-2 encoding on
-# the same real artifacts as the shipped one without enabling it for `cargo build`.
+# Independent graph evaluator and optional encoding checks.
 [dev-dependencies]
 circom-witnesscalc = "0.3.0"
 curvy-witness = { workspace = true, features = ["sage", "signet"] }

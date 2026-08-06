@@ -1,24 +1,6 @@
-//! Pure-Rust witness generation + Groth16 proving for Curvy's deployed circuits.
-//! A Curvy-owned `CVYWIT01` evaluation graph turns a circuit-input JSON into a
-//! snarkjs-identical witness with no JS/node runtime, then `curvy-prover` proves it
-//! into a snarkjs-shaped proof the deployed verifiers accept.
+//! Witness generation and Groth16 proving for bundled Curvy circuits.
 //!
-//! ## Why CVYWIT and not iden3 `circom-witnesscalc`
-//! Both evaluate the same circuit to the same assignment; `tests/pix_profiles.rs`
-//! asserts that signal for signal. `curvy-witness` is preferred because it is ours,
-//! it validates every graph reference before evaluating, and it is pure Rust - the
-//! iden3 crate pulls in a `bindgen`/`clang` build requirement that broke the Nix and
-//! bare-Linux setups this SDK has to run on. It survives as a dev-dependency purely
-//! so the cross-evaluator equivalence gate can still be run.
-//!
-//! ## Artifact resolution (documented order)
-//! Graphs and proving keys are pinned by sha256 and resolved per circuit:
-//! 1. an env-var override (`CURVY_<CIRCUIT>_GRAPH` / `CURVY_<CIRCUIT>_ZKEY`);
-//! 2. graphs use the authenticated files bundled under `artifacts/cvywit`;
-//! 3. zkeys use their circuit-relative path under `CURVY_ZK_KEYS_DIR`.
-//!
-//! The zkeys remain external Git-LFS artifacts. Loading a graph or zkey whose
-//! SHA-256 does not match the pin is a hard error: wrong artifact or wrong setup.
+//! Graphs and proving keys are authenticated by SHA-256 before use.
 
 use anyhow::{Context, Result, bail};
 use ark_bn254::Fr;
@@ -29,29 +11,25 @@ use std::path::PathBuf;
 pub mod pending;
 pub mod pix;
 
-/// Circuit input JSON → the full BN254 witness assignment (index 0 is the constant
-/// 1). The seam the SDK proves against; the graph impl is the only implementor today.
+/// Produces a BN254 witness assignment from circuit input JSON.
 pub trait WitnessCalculator {
     fn calculate(&self, input_json: &str) -> Result<Vec<Fr>>;
 }
 
-/// A parsed, reusable `CVYWIT01` evaluation graph.
+/// A parsed, reusable `SIGNET01` evaluation graph.
 pub struct GraphWitnessCalculator {
     graph: WitnessGraph,
 }
 
 impl GraphWitnessCalculator {
-    /// Authenticate and parse one graph. `WitnessGraph::from_bytes` hashes the
-    /// complete artifact before decoding anything, so this is the pin check - there
-    /// is deliberately no second pass over the same bytes.
+    /// Authenticate and parse a graph.
     pub fn from_graph_bytes(bytes: &[u8], expected_sha256: &str) -> Result<Self> {
         Ok(Self {
             graph: WitnessGraph::from_bytes(bytes, expected_sha256)?,
         })
     }
 
-    /// Signal count this graph produces, i.e. the assignment length the paired zkey
-    /// must expect.
+    /// Number of signals produced by this graph.
     pub fn assignment_size(&self) -> usize {
         self.graph.assignment_size()
     }
@@ -67,7 +45,7 @@ fn sha256_hex(b: &[u8]) -> String {
     hex::encode(Sha256::digest(b))
 }
 
-/// One deployed circuit config: pinned graph + zkey and on-chain arity.
+/// Pinned graph, proving key, and public-input count.
 pub struct Circuit {
     pub key: &'static str,
     pub label: &'static str,
@@ -75,13 +53,13 @@ pub struct Circuit {
     graph_default: &'static str,
     graph_sha256: &'static str,
     zkey_env: &'static str,
-    zkey_relative: &'static str,
+    zkey_file: &'static str,
     zkey_sha256: &'static str,
     pub num_public: usize,
 }
 
 fn bundled_graphs() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../artifacts/cvywit")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../artifacts/signet")
 }
 
 impl Circuit {
@@ -90,10 +68,10 @@ impl Circuit {
             key: "withdrawal",
             label: "withdrawal(2,30)",
             graph_env: "CURVY_WITHDRAWAL_GRAPH",
-            graph_default: "withdrawal-2-30.cvywit.bin",
-            graph_sha256: "71295ae000c466d2111969cb335597f63c1a1a3d3990878d4b996757fa9998d3",
+            graph_default: "withdrawal-2-30.signet.zst",
+            graph_sha256: "04b2fa84394548a971c757c61280b81fb7699a367eeb45834201675f8a0aad74",
             zkey_env: "CURVY_WITHDRAWAL_ZKEY",
-            zkey_relative: "withdrawal/verifySingleWithdrawalNoHashing_2_30_0001.zkey",
+            zkey_file: "verifySingleWithdrawalNoHashing_2_30_0001.zkey",
             zkey_sha256: "c91d9fdbea6edde296e9676bdb97959f6acb5f32360b5490c01cea9814844716",
             num_public: 6,
         }
@@ -104,10 +82,10 @@ impl Circuit {
             key: "aggregation",
             label: "aggregation(2,3,30,6)",
             graph_env: "CURVY_AGGREGATION_GRAPH",
-            graph_default: "aggregation-2-3-30.cvywit.bin",
-            graph_sha256: "eec4484ede443daf34947e0e622951da2749d5d919f10cf7560bd19a430e08dd",
+            graph_default: "aggregation-2-3-30.signet.zst",
+            graph_sha256: "8c6eb16f41cc147fca8809804c0f0743d463aeba2ee45a02e7b32b6a27904386",
             zkey_env: "CURVY_AGGREGATION_ZKEY",
-            zkey_relative: "aggregation/verifySingleAggregationNoHashing_2_3_30_0001.zkey",
+            zkey_file: "verifySingleAggregationNoHashing_2_3_30_0001.zkey",
             zkey_sha256: "88a85746f60820712199a60ee13241181658250ba9855af61503d306c52ba4e6",
             num_public: 31,
         }
@@ -118,10 +96,10 @@ impl Circuit {
             key: "pix-aggregation",
             label: "pix-aggregation(2,9,30,6)",
             graph_env: "CURVY_PIX_AGGREGATION_GRAPH",
-            graph_default: "pix-aggregation-2-9-30.cvywit.bin",
-            graph_sha256: "3189a0dea620d68e0beeb7b3987367e94cee7b4f5574d8ef797eec0f4365ece9",
+            graph_default: "pix-aggregation-2-9-30.signet.zst",
+            graph_sha256: "b974028ba40afdc067524819d61bdd9172a5e56369cfc05a75ba5d469c379c3a",
             zkey_env: "CURVY_PIX_AGGREGATION_ZKEY",
-            zkey_relative: "pix/aggregation/verifyPixAggregation_2_9_30_evaluation.zkey",
+            zkey_file: "verifyPixAggregation_2_9_30_evaluation.zkey",
             zkey_sha256: "b4fced8a3c183d25a13a24c9ee7234ec96b77f87f688992ee07144f23ace6750",
             num_public: 67,
         }
@@ -132,10 +110,10 @@ impl Circuit {
             key: "pix-withdrawal",
             label: "pix-withdrawal(10,30)",
             graph_env: "CURVY_PIX_WITHDRAWAL_GRAPH",
-            graph_default: "pix-withdrawal-10-30.cvywit.bin",
-            graph_sha256: "99f69d992b0aed23cbac86a3cd27c3983f2240d45c405ba0a9e37ee8d59ecbf0",
+            graph_default: "pix-withdrawal-10-30.signet.zst",
+            graph_sha256: "90d301a189ceea1a7574f410bd94e53e9da0da0e75d8bfb99d47c42295fdfa56",
             zkey_env: "CURVY_PIX_WITHDRAWAL_ZKEY",
-            zkey_relative: "pix/withdrawal/verifyPixMultiOwnerWithdrawal_10_30_evaluation.zkey",
+            zkey_file: "verifyPixMultiOwnerWithdrawal_10_30_evaluation.zkey",
             zkey_sha256: "e18f0fdd40aa2643c31c3a02ef0a508b5c7580a436abcae88e364ee86be6a95b",
             num_public: 14,
         }
@@ -146,17 +124,16 @@ impl Circuit {
             key: "pending",
             label: "pending-notes-commitment(5,30)",
             graph_env: "CURVY_PENDING_GRAPH",
-            graph_default: "pending-5-30.cvywit.bin",
-            graph_sha256: "cdbaa9072b962689b648991a4dac4a863305d9e9db341e98fa0a48d89d0f6a37",
+            graph_default: "pending-5-30.signet.zst",
+            graph_sha256: "69fa449825732a0958ccd0689ad361d9e8df1223231d8b71932d0efc4a07d8f0",
             zkey_env: "CURVY_PENDING_ZKEY",
-            zkey_relative: "pending-notes-commitment/verifyPendingNotesCommitment_5_30_0001.zkey",
+            zkey_file: "verifyPendingNotesCommitment_5_30_0001.zkey",
             zkey_sha256: "efb4c3d4d3350f931860faeb6319b6010303c5fbf06d8ef414d708e9cf907847",
             num_public: 1,
         }
     }
 
-    /// Every circuit the PIX acceptance flow proves, in the order it uses them.
-    /// Handy for an up-front artifact preflight (see [`verify_artifacts`](Self::verify_artifacts)).
+    /// Circuits used by the acceptance flow, in execution order.
     pub fn pix_flow() -> [Self; 3] {
         [
             Circuit::pending(),
@@ -165,19 +142,19 @@ impl Circuit {
         ]
     }
 
-    /// Resolved location of this circuit's evaluation graph, honouring the env override.
+    /// Resolved graph path, including environment overrides.
     pub fn graph_path(&self) -> PathBuf {
         std::env::var(self.graph_env)
             .map(PathBuf::from)
             .unwrap_or_else(|_| bundled_graphs().join(self.graph_default))
     }
 
-    /// The pinned graph digest. Exposed so a consumer can authenticate the artifact
-    /// itself - the SDK re-exports this crate precisely for that.
+    /// Pinned graph digest.
     pub fn graph_sha256(&self) -> &'static str {
         self.graph_sha256
     }
-    fn zkey_path(&self) -> Result<PathBuf> {
+    /// Resolved proving-key path, including environment overrides.
+    pub fn zkey_path(&self) -> Result<PathBuf> {
         if let Some(path) = std::env::var_os(self.zkey_env) {
             return Ok(PathBuf::from(path));
         }
@@ -187,7 +164,7 @@ impl Circuit {
                 self.key, self.zkey_env
             )
         })?;
-        Ok(PathBuf::from(root).join(self.zkey_relative))
+        Ok(PathBuf::from(root).join(self.zkey_file))
     }
 
     /// Read a pinned artifact and hard-fail on a digest mismatch.
@@ -211,10 +188,7 @@ impl Circuit {
         Ok(bytes)
     }
 
-    /// Resolve and pin-check this circuit's graph **and** proving key without
-    /// parsing either. The point is failing fast: a missing `CURVY_ZK_KEYS_DIR` or a
-    /// stale zkey otherwise only surfaces minutes into a run, after the deposit and
-    /// the first commitment have already hit the chain.
+    /// Verify the graph and proving-key digests.
     pub fn verify_artifacts(&self) -> Result<()> {
         self.read_pinned(
             &self.graph_path(),
@@ -231,8 +205,7 @@ impl Circuit {
         Ok(())
     }
 
-    /// Load + pin-check the evaluation graph. The parser authenticates the artifact
-    /// itself, so the bytes are read once and hashed once.
+    /// Load and authenticate the evaluation graph.
     pub fn load_calculator(&self) -> Result<GraphWitnessCalculator> {
         let path = self.graph_path();
         let bytes = std::fs::read(&path).with_context(|| {
@@ -252,7 +225,7 @@ impl Circuit {
         })
     }
 
-    /// Load + pin-check the proving key into a `curvy-prover::Prover`.
+    /// Load and authenticate the proving key.
     pub fn load_prover(&self) -> Result<Prover> {
         let zkey = self.read_pinned(
             &self.zkey_path()?,
@@ -266,8 +239,7 @@ impl Circuit {
         })
     }
 
-    /// End-to-end for this circuit: input JSON → pure-Rust witness → Groth16 proof.
-    /// Verifies off-chain before returning (a fast failure localizes to witness/zkey).
+    /// Generate and verify a Groth16 proof.
     pub fn prove(&self, input_json: &str) -> Result<ProofBundle> {
         let calc = self.load_calculator()?;
         let prover = self.load_prover()?;

@@ -1,4 +1,4 @@
-//! Pure-Rust compatibility gates for the fixed PIX circuit profiles.
+//! Compatibility tests for the bundled circuit profiles.
 
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
@@ -132,9 +132,7 @@ fn real_pix_withdrawal_graph_accepts_ten_unrelated_owners() {
     assert_eq!(assignment[1], Fr::from(1_045u64));
 }
 
-/// Every circuit the PIX flow proves, driven all the way to a self-verifying Groth16
-/// proof off the CVYWIT assignment. The equivalence tests above show the assignment is
-/// right; this shows the deployed proving keys still accept it.
+/// Every acceptance-flow circuit must produce a verifiable proof.
 #[test]
 #[ignore = "requires the evaluation zkeys via CURVY_ZK_KEYS_DIR"]
 fn real_evaluation_zkeys_prove_every_pix_flow_profile() {
@@ -154,23 +152,14 @@ fn real_evaluation_zkeys_prove_every_pix_flow_profile() {
     assert_eq!(withdrawal.public_signals.len(), 14);
 }
 
-/// The two evaluators must agree, signal for signal.
-///
-/// Production now evaluates the Curvy-owned `CVYWIT01` graphs. That is only safe if
-/// they reproduce the iden3 `circom-witnesscalc` graphs exactly: the assignment feeds
-/// Groth16 directly, so a single differing signal is a proof the deployed verifier
-/// rejects - and the two graphs are built by different toolchains from the same
-/// circuit, which is precisely the kind of divergence nothing else would catch.
-///
-/// `circom-witnesscalc` is a dev-dependency only, so it is the *reference* here and
-/// never ships.
+/// Both graph evaluators must produce identical assignments.
 fn assert_evaluators_agree(circuit: Circuit, input: &str, iden3_graph: &str, iden3_sha256: &str) {
     let reference = iden3_assignment(iden3_graph, iden3_sha256, input);
     let candidate = circuit
         .load_calculator()
-        .expect("load pinned CVYWIT01 graph")
+        .expect("load pinned SIGNET01 graph")
         .calculate(input)
-        .expect("CVYWIT01 witness");
+        .expect("SIGNET01 witness");
 
     assert_eq!(
         candidate.len(),
@@ -183,7 +172,7 @@ fn assert_evaluators_agree(circuit: Circuit, input: &str, iden3_graph: &str, ide
     );
 }
 
-/// Evaluate one input against a pinned iden3 graph, the independent reference.
+/// Evaluate an input with the pinned reference graph.
 fn iden3_assignment(graph_name: &str, expected_sha256: &str, input: &str) -> Vec<Fr> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../artifacts/graphs")
@@ -202,8 +191,7 @@ fn iden3_assignment(graph_name: &str, expected_sha256: &str, input: &str) -> Vec
     curvy_prover::wtns::read_wtns(&wtns).expect("decode iden3 wtns")
 }
 
-/// Every bundled graph pin must resolve and authenticate. Cheap, and it catches a
-/// stale/misnamed artifact before a run reaches the chain.
+/// Every bundled graph must resolve and authenticate.
 #[test]
 fn every_bundled_graph_pin_resolves() {
     for circuit in [
@@ -241,8 +229,7 @@ fn curvy_witness_reproduces_the_pix_withdrawal_assignment() {
     );
 }
 
-/// The circuit that blocked the swap: it is the only one using circom's bitwise
-/// operators, which the upstream generator left unimplemented.
+/// The withdrawal profile exercises bitwise operators.
 #[test]
 fn curvy_witness_reproduces_the_pending_assignment() {
     assert_evaluators_agree(
@@ -253,18 +240,10 @@ fn curvy_witness_reproduces_the_pending_assignment() {
     );
 }
 
-/// SAGE, the experimental slot-allocated evaluator, must agree with the shipped one on
-/// every artifact we actually deploy, not just on synthetic graphs.
-///
-/// It stores one field element per *live* node rather than one per node, so the risk
-/// it carries is slot recycling: a slot freed one instruction too early yields a wrong
-/// assignment, not a crash. Only a full-assignment comparison catches that, and only
-/// on real graphs - the recycling pattern depends on the circuit's shape.
+/// The slot-allocated evaluator must match the standard evaluator.
 #[test]
 fn sage_reproduces_every_bundled_profile() {
-    // The three profiles this crate has input builders for; they include the largest
-    // graph and the only one using bitwise operators. The research harness covers the
-    // two legacy profiles as well.
+    // Profiles with input builders in this crate.
     for (circuit, input) in [
         (Circuit::pix_aggregation(), pix_aggregation_input()),
         (Circuit::pix_withdrawal(), pix_withdrawal_input()),
@@ -298,15 +277,14 @@ fn sage_reproduces_every_bundled_profile() {
     }
 }
 
-/// CVYWIT v2 is a denser wire encoding of the same logical graph. Not published, so
-/// this only runs when a v2 artifact is supplied.
+/// An optional SIGNET v2 artifact must match the bundled graph.
 #[test]
 fn curvy_witness_v2_reproduces_the_pending_assignment() {
     let (Ok(path), Ok(expected_sha)) = (
-        std::env::var("CURVY_PENDING_CVYWIT_V2"),
-        std::env::var("CURVY_PENDING_CVYWIT_V2_SHA256"),
+        std::env::var("CURVY_PENDING_SIGNET_V2"),
+        std::env::var("CURVY_PENDING_SIGNET_V2_SHA256"),
     ) else {
-        eprintln!("skipping: set CURVY_PENDING_CVYWIT_V2 and CURVY_PENDING_CVYWIT_V2_SHA256");
+        eprintln!("skipping: set CURVY_PENDING_SIGNET_V2 and CURVY_PENDING_SIGNET_V2_SHA256");
         return;
     };
 
@@ -316,11 +294,11 @@ fn curvy_witness_v2_reproduces_the_pending_assignment() {
         "3cc81fe0a084c0b11bb627c564f20f1f86d5368ffa19d1d558b03c0414b5f69b",
         &input,
     );
-    let bytes = std::fs::read(&path).expect("read CVYWIT v2 graph");
+    let bytes = std::fs::read(&path).expect("read SIGNET v2 graph");
     let candidate = curvy_witness::WitnessGraph::from_bytes(&bytes, &expected_sha)
-        .expect("parse CVYWIT v2 graph")
+        .expect("parse SIGNET v2 graph")
         .calculate_json(&input)
-        .expect("CVYWIT v2 witness");
+        .expect("SIGNET v2 witness");
 
     assert_eq!(
         candidate, reference,

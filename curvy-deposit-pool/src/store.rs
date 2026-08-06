@@ -1,19 +1,9 @@
-//! Durable state for [`CurvyDepositPool`](crate::CurvyDepositPool).
-//!
-//! Losing this state loses money. A note's `ownerHash` is
-//! `poseidon(ownerPub, sharedSecret)` and the shared secret is chosen by the pool at
-//! allocation time - it is never derivable from the deposit key HOPR later hands back.
-//! So a pool that forgets its mapping cannot locate the notes it owes, and the funds sit
-//! on-chain, provably unspent and permanently unreachable.
-//!
-//! Records are stored as decimal strings rather than raw field elements: the encoding is
-//! then independent of the arkworks version and readable when something needs debugging
-//! by hand.
+//! Durable deposit-pool state using decimal field encodings.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use curvy_core::field::{Fr, fr_from_dec, fr_to_dec};
+use curvy_core::field::{Fr, fr_to_biguint, fr_to_dec};
 use curvy_sdk::OwnedNote;
 use serde::{Deserialize, Serialize};
 
@@ -44,17 +34,54 @@ impl From<&OwnedNote> for StoredNote {
     }
 }
 
-impl From<&StoredNote> for OwnedNote {
-    fn from(stored: &StoredNote) -> Self {
-        let pair = |v: &[String; 2]| -> (Fr, Fr) { (fr_from_dec(&v[0]), fr_from_dec(&v[1])) };
-        OwnedNote {
-            owner_pub: pair(&stored.owner_pub),
-            shared_secret: fr_from_dec(&stored.shared_secret),
-            ephemeral_key: pair(&stored.ephemeral_key),
-            view_tag: stored.view_tag,
-            amount: fr_from_dec(&stored.amount),
-            token: fr_from_dec(&stored.token),
+/// Parse a canonical persisted field element.
+pub fn fr_from_dec_checked(value: &str) -> Option<Fr> {
+    let parsed = value.parse::<num_bigint::BigUint>().ok()?;
+    let element = curvy_core::field::fr_from_biguint(&parsed);
+    (curvy_core::field::fr_to_biguint(&element) == parsed).then_some(element)
+}
+
+/// A persisted record that does not decode.
+#[derive(Debug, thiserror::Error)]
+#[error("corrupt persisted state: {field} is not a canonical field element ({value:?})")]
+pub struct CorruptRecord {
+    pub field: &'static str,
+    pub value: String,
+}
+
+fn field(value: &str, name: &'static str) -> Result<Fr, CorruptRecord> {
+    fr_from_dec_checked(value).ok_or_else(|| CorruptRecord {
+        field: name,
+        value: value.to_owned(),
+    })
+}
+
+impl TryFrom<&StoredNote> for OwnedNote {
+    type Error = CorruptRecord;
+
+    fn try_from(stored: &StoredNote) -> Result<Self, Self::Error> {
+        let amount = field(&stored.amount, "amount")?;
+        let amount_fits: std::result::Result<u128, _> = fr_to_biguint(&amount).try_into();
+        if amount_fits.is_err() {
+            return Err(CorruptRecord {
+                field: "amount (u128)",
+                value: stored.amount.clone(),
+            });
         }
+        Ok(OwnedNote {
+            owner_pub: (
+                field(&stored.owner_pub[0], "owner_pub.x")?,
+                field(&stored.owner_pub[1], "owner_pub.y")?,
+            ),
+            shared_secret: field(&stored.shared_secret, "shared_secret")?,
+            ephemeral_key: (
+                field(&stored.ephemeral_key[0], "ephemeral_key.x")?,
+                field(&stored.ephemeral_key[1], "ephemeral_key.y")?,
+            ),
+            view_tag: stored.view_tag,
+            amount,
+            token: field(&stored.token, "token")?,
+        })
     }
 }
 
@@ -68,6 +95,45 @@ pub struct StoredAllocation {
     pub amount: String,
 }
 
+/// Reservation for an aggregation with an unknown outcome.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredInFlight {
+    pub batch: Vec<StoredAllocation>,
+    pub funding: StoredNote,
+    /// Exact random outputs, once transaction submission became ambiguous.
+    #[serde(default)]
+    pub outputs: Option<StoredAggregationOutputs>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredAggregationOutputs {
+    pub allocations: Vec<StoredNote>,
+    pub change: StoredNote,
+    /// Circuit outputs in on-chain order.
+    #[serde(default)]
+    pub emitted_notes: Vec<StoredNote>,
+}
+
+/// Durable stage of the pool's two-transaction shield operation.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredShieldStage {
+    /// The note/portal is fixed, but funding has not been confirmed.
+    Prepared,
+    /// Portal funding is confirmed; deploy-and-shield may be resumed safely.
+    Funded,
+}
+
+/// Recovery handle for a pool-funding shield.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredShield {
+    pub note: StoredNote,
+    pub gross: String,
+    pub recovery: String,
+    pub portal_address: String,
+    pub stage: StoredShieldStage,
+}
+
 /// Everything the pool must remember across a restart.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedState {
@@ -75,18 +141,26 @@ pub struct PersistedState {
     pub deposits: HashMap<String, Vec<StoredNote>>,
     /// Committed notes the pool can spend.
     pub funding: Vec<StoredNote>,
-    /// Accepted-but-unproved allocations, so an enqueued deposit is not silently lost
-    /// when the process dies between accepting it and proving it.
+    /// Accepted allocations awaiting a proof.
     pub queue: Vec<StoredAllocation>,
     /// Notes that exist on-chain but whose commitment has not landed yet.
     #[serde(default)]
     pub uncommitted: Vec<StoredNote>,
+    /// Aggregation reservation awaiting reconciliation.
+    #[serde(default)]
+    pub in_flight: Option<StoredInFlight>,
+    /// A shield whose random note was fixed before its portal was funded.
+    #[serde(default)]
+    pub shield_in_flight: Option<StoredShield>,
+    /// Notes reserved for a commitment whose submission outcome is unresolved.
+    #[serde(default)]
+    pub commitment_in_flight: Vec<StoredNote>,
+    /// Notes reserved for a withdrawal whose submission outcome is unresolved.
+    #[serde(default)]
+    pub withdrawal_in_flight: Vec<StoredNote>,
 }
 
-/// Where a pool keeps its state.
-///
-/// A seam rather than a hard-coded file so a node can put this in whatever it already
-/// trusts - an encrypted store, a database, a test's memory.
+/// Deposit-pool persistence interface.
 pub trait DepositStore: Send + Sync {
     fn load(&self) -> anyhow::Result<PersistedState>;
     fn save(&self, state: &PersistedState) -> anyhow::Result<()>;
@@ -127,7 +201,6 @@ impl JsonFileStore {
 impl DepositStore for JsonFileStore {
     fn load(&self) -> anyhow::Result<PersistedState> {
         match std::fs::read(&self.path) {
-            // A missing file is a first run, not a failure.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(PersistedState::default())
             }
@@ -140,8 +213,7 @@ impl DepositStore for JsonFileStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Write-then-rename: a crash mid-save must not leave a half-written file where
-        // the shared secrets used to be. Rename is atomic on the same filesystem.
+        // Rename the complete temporary file atomically.
         let temp = self.temp_path();
         std::fs::write(&temp, serde_json::to_vec_pretty(state)?)?;
         std::fs::rename(&temp, &self.path)?;
@@ -187,9 +259,8 @@ mod tests {
 
     #[test]
     fn a_note_survives_the_round_trip_exactly() {
-        // Every field matters: a mangled shared secret silently orphans the note.
         let original = note(1_234_567_890_123_456_789);
-        let restored: OwnedNote = (&StoredNote::from(&original)).into();
+        let restored = OwnedNote::try_from(&StoredNote::from(&original)).expect("round trip");
         assert_eq!(restored.owner_pub, original.owner_pub);
         assert_eq!(restored.shared_secret, original.shared_secret);
         assert_eq!(restored.ephemeral_key, original.ephemeral_key);
@@ -197,6 +268,104 @@ mod tests {
         assert_eq!(restored.amount, original.amount);
         assert_eq!(restored.token, original.token);
         assert_eq!(restored.note_id(), original.note_id());
+    }
+
+    /// Out-of-range field values are rejected.
+    #[test]
+    fn an_out_of_range_value_is_rejected_rather_than_reduced() {
+        let modulus = curvy_core::field::fr_to_biguint(&-Fr::from(1u64)) + 1u64;
+        let past_the_end = (&modulus + 5u64).to_string();
+
+        assert!(
+            fr_from_dec_checked(&past_the_end).is_none(),
+            "modulus + 5 must be refused, not silently read back as 5"
+        );
+        assert!(fr_from_dec_checked(&modulus.to_string()).is_none());
+        assert_eq!(
+            fr_from_dec_checked(&(&modulus - 1u64).to_string()),
+            Some(-Fr::from(1u64)),
+            "the largest canonical value is still valid"
+        );
+    }
+
+    #[test]
+    fn a_non_numeric_value_is_refused_rather_than_panicking() {
+        assert!(fr_from_dec_checked("not a number").is_none());
+        assert!(fr_from_dec_checked("").is_none());
+        assert!(
+            fr_from_dec_checked("-1").is_none(),
+            "signs are not canonical"
+        );
+        assert_eq!(fr_from_dec_checked("0"), Some(Fr::from(0u64)));
+    }
+
+    #[test]
+    fn a_canonical_amount_outside_the_pool_value_range_is_rejected() {
+        let mut stored = StoredNote::from(&note(1));
+        stored.amount = (num_bigint::BigUint::from(u128::MAX) + 1u64).to_string();
+        let error = OwnedNote::try_from(&stored).unwrap_err();
+        assert_eq!(error.field, "amount (u128)");
+    }
+
+    /// Reservations survive serialization.
+    #[test]
+    fn a_reservation_survives_the_json_round_trip() {
+        let state = PersistedState {
+            in_flight: Some(StoredInFlight {
+                batch: vec![StoredAllocation {
+                    address: address_hex(&[7u8; 32]),
+                    shared_secret: "12345".to_owned(),
+                    amount: "999".to_owned(),
+                }],
+                funding: StoredNote::from(&note(4_000)),
+                outputs: Some(StoredAggregationOutputs {
+                    allocations: vec![StoredNote::from(&note(999))],
+                    change: StoredNote::from(&note(3_001)),
+                    emitted_notes: vec![
+                        StoredNote::from(&note(999)),
+                        StoredNote::from(&note(3_001)),
+                        StoredNote::from(&note(17)),
+                    ],
+                }),
+            }),
+            commitment_in_flight: vec![StoredNote::from(&note(999))],
+            withdrawal_in_flight: vec![StoredNote::from(&note(500))],
+            ..PersistedState::default()
+        };
+
+        let encoded = serde_json::to_vec(&state).expect("encode");
+        let decoded: PersistedState = serde_json::from_slice(&encoded).expect("decode");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn a_prepared_shield_survives_the_json_round_trip() {
+        let state = PersistedState {
+            shield_in_flight: Some(StoredShield {
+                note: StoredNote::from(&note(4_000)),
+                gross: "5000".to_string(),
+                recovery: "0x0000000000000000000000000000000000000001".to_string(),
+                portal_address: "0x0000000000000000000000000000000000000002".to_string(),
+                stage: StoredShieldStage::Funded,
+            }),
+            ..PersistedState::default()
+        };
+
+        let encoded = serde_json::to_vec(&state).expect("encode");
+        let decoded: PersistedState = serde_json::from_slice(&encoded).expect("decode");
+        assert_eq!(decoded, state);
+    }
+
+    /// Missing optional fields use their defaults.
+    #[test]
+    fn state_without_a_reservation_field_still_loads() {
+        let legacy = br#"{"deposits":{},"funding":[],"queue":[]}"#;
+        let decoded: PersistedState = serde_json::from_slice(legacy).expect("decode legacy state");
+        assert!(decoded.in_flight.is_none());
+        assert!(decoded.uncommitted.is_empty());
+        assert!(decoded.shield_in_flight.is_none());
+        assert!(decoded.commitment_in_flight.is_empty());
+        assert!(decoded.withdrawal_in_flight.is_empty());
     }
 
     #[test]
