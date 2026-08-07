@@ -25,7 +25,9 @@ use curvy_chain_api::{
     TxSubmitter,
 };
 
-use crate::account::{Account, Identity, OwnedNote, parse_fr_decimal, parse_xy};
+use crate::account::{
+    Account, Identity, OwnedNote, parse_fr_decimal, shared_secret_from_spending_pub_key,
+};
 use crate::send::{fee_note, seal_known_owner, seal_note, shield_net_amount, zero_pad_note};
 
 const TREE_DEPTH: usize = 30;
@@ -1565,8 +1567,8 @@ impl CurvyClient {
             let (note_id_dec, enc_amount, enc_token, is_plain, ex, ey) = meta
                 .get(index)
                 .with_context(|| format!("stealth match index {index} is out of bounds"))?;
-            let (shared_secret, _) =
-                parse_xy(&m.spending_pub_key).context("parse scanned shared-secret point")?;
+            let shared_secret = shared_secret_from_spending_pub_key(&m.spending_pub_key)
+                .context("parse scanned shared-secret point")?;
 
             let (amount, token) = if *is_plain {
                 (

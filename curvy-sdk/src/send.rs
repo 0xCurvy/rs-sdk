@@ -7,14 +7,14 @@ use curvy_core::{eddsa, stealth};
 use num_bigint::BigUint;
 use sha3::{Digest, Keccak256};
 
-use crate::account::{Identity, OwnedNote, parse_xy};
+use crate::account::{Identity, OwnedNote, parse_xy, shared_secret_from_spending_pub_key};
 
 /// Seal an output note to a stealth recipient.
 pub fn seal_note(recipient: &Identity, amount: Fr, token: Fr) -> Result<OwnedNote> {
     let (_r, out) = stealth::send(&recipient.big_k, &recipient.big_v)
         .map_err(|e| anyhow::anyhow!("stealth send: {e}"))?;
-    let (shared_secret, _) =
-        parse_xy(&out.spending_pub_key).context("parse stealth shared-secret point")?;
+    let shared_secret = shared_secret_from_spending_pub_key(&out.spending_pub_key)
+        .context("parse stealth shared-secret point")?;
     let ephemeral_key = parse_xy(&out.big_r)?;
     let view_tag = u16::from_str_radix(&out.view_tag, 16).context("parse stealth view tag")?;
     Ok(OwnedNote {

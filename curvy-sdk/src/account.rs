@@ -143,6 +143,24 @@ pub(crate) fn parse_fr_decimal(value: &str, name: &str) -> Result<Fr> {
     Ok(field)
 }
 
+/// Convert the x-coordinate of a validated secp256k1 stealth spending key into the
+/// circuit field. Unlike BN254 point coordinates, a secp256k1 coordinate is commonly
+/// larger than `Fr`; Circom's field-input semantics intentionally reduce it modulo
+/// the BN254 scalar modulus.
+pub(crate) fn shared_secret_from_spending_pub_key(value: &str) -> Result<Fr> {
+    let (x, y) = value
+        .split_once('.')
+        .with_context(|| format!("spending public key not \"x.y\": {value:?}"))?;
+    let x = BigUint::parse_bytes(x.as_bytes(), 10).with_context(|| {
+        format!("spending public key x is not a non-negative decimal integer: {x:?}")
+    })?;
+    // Validate the complete point encoding even though the note only retains x.
+    BigUint::parse_bytes(y.as_bytes(), 10).with_context(|| {
+        format!("spending public key y is not a non-negative decimal integer: {y:?}")
+    })?;
+    Ok(fr_from_biguint(&x))
+}
+
 /// A note this SDK owns/represents. Mirrors `curvy_core::witness::Note` but keeps
 /// `view_tag` as the 16-bit on-chain integer and carries no proof.
 #[derive(Clone, Debug)]
@@ -230,6 +248,18 @@ mod tests {
         assert_eq!(
             parse_fr_decimal(&(&modulus - 1u64).to_string(), "fixture").unwrap(),
             -Fr::from(1u64)
+        );
+    }
+
+    #[test]
+    fn secp256k1_spending_key_x_is_reduced_into_the_circuit_field() {
+        // This is the x-coordinate from the reported E2E failure. It is a valid
+        // secp256k1-sized integer but is larger than the BN254 scalar modulus.
+        let point =
+            "32698479659614466080731542574241191046759570361607100919005446900112301901512.1";
+        assert_eq!(
+            fr_to_biguint(&shared_secret_from_spending_pub_key(point).unwrap()).to_string(),
+            "10810236787775190858485136828983915958211205961191066575307242713536493405895"
         );
     }
 }
