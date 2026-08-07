@@ -605,26 +605,46 @@ impl CurvyClient {
     /// Rebuild the local note tree and reconcile it against the chain root.
     pub async fn sync(&self) -> Result<Vec<Fr>> {
         let mut last_local_root = String::new();
+        let mut last_index_root = None;
+        let mut last_leaf_count = 0usize;
+        let mut last_chain_state = curvy_types::AggregatorState::default();
         for _ in 0..20 {
-            let leaves = match self.notes.notes_tree_snapshot().await? {
-                Some(snapshot) => snapshot
-                    .leaves
-                    .iter()
-                    .map(|id| parse_fr_decimal(id, "snapshot note id"))
-                    .collect::<Result<Vec<_>>>()?,
-                None => self.leaves_from_events().await?,
+            let (leaves, index_root) = match self.notes.notes_tree_snapshot().await? {
+                Some(snapshot) => (
+                    snapshot
+                        .leaves
+                        .iter()
+                        .map(|id| parse_fr_decimal(id, "snapshot note id"))
+                        .collect::<Result<Vec<_>>>()?,
+                    Some(snapshot.notes_root),
+                ),
+                None => (self.leaves_from_events().await?, None),
             };
 
             last_local_root = fr_to_dec(&Imt::from_leaves(TREE_DEPTH, &leaves).root());
-            let state = self.anchor.state().await?;
-            if state.current_notes_root == last_local_root {
+            last_leaf_count = leaves.len();
+            last_index_root = index_root;
+            last_chain_state = self.anchor.state().await?;
+            let snapshot_is_consistent = last_index_root
+                .as_ref()
+                .is_none_or(|root| *root == last_local_root);
+            if snapshot_is_consistent
+                && last_chain_state.current_note_index as usize == last_leaf_count
+                && last_chain_state.current_notes_root == last_local_root
+            {
                 self.storage.lock().unwrap().tree_leaves = leaves.clone();
                 return Ok(leaves);
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
+        let index_root = last_index_root.as_deref().unwrap_or("event-log fallback");
         bail!(
-            "sync: configured index root {last_local_root} does not reconcile with the chain root after retries"
+            "sync: index did not reconcile after retries: {last_leaf_count} indexed leaves build root \
+             {last_local_root}; checkpoint root {index_root}; chain noteIndex {} has root {}. A fresh \
+             Anvil paired with persisted Blokli SQLite files is stale; start the stack with a new \
+             /data directory",
+            last_chain_state.current_note_index,
+            last_chain_state.current_notes_root,
         )
     }
 

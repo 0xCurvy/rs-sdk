@@ -71,11 +71,19 @@ cd ~/Projects/blokli && docker load < result-curvy-image
 ```
 
 ```bash
-mkdir -p /tmp/blokli-curvy-data && docker run --rm --name bloklid-anvil-curvy -e ANVIL_HOST=0.0.0.0 -p 8545:8545 -p 8080:8080 -v /tmp/blokli-curvy-data:/data bloklid-anvil-curvy:latest
+export BLOKLI_E2E_DATA="$(mktemp -d /tmp/blokli-curvy-data.XXXXXX)"
+docker run --rm --name bloklid-anvil-curvy -e ANVIL_HOST=0.0.0.0 -p 8545:8545 -p 8080:8080 -v "$BLOKLI_E2E_DATA:/data" bloklid-anvil-curvy:latest
 ```
 
-The manifest lands at `/tmp/blokli-curvy-data/curvy_deployed_addresses.json`. Nix
-flakes copy tracked files only, so `git add -N` stages any new file for the build.
+The manifest lands at `$BLOKLI_E2E_DATA/curvy_deployed_addresses.json`. Use a new
+directory for every container start: the entrypoint starts a fresh Anvil, while the
+SQLite files under `/data` persist in the host mount. Reusing the directory pairs a
+new chain with a stale notes index. Nix flakes copy tracked files only, so `git add
+-N` stages any new file for the build.
+
+Docker state note: `--rm` removes the container, but it does not remove files from
+the bind-mounted data directory. A restarted container must never reuse the prior
+`$BLOKLI_E2E_DATA` path.
 
 ### Running it
 
@@ -83,7 +91,7 @@ Set the runtime paths before starting:
 
 ```bash
 export BLOKLI_URL=http://127.0.0.1:8080
-export CURVY_ADDRESSES=/tmp/blokli-curvy-data/curvy_deployed_addresses.json
+export CURVY_ADDRESSES="$BLOKLI_E2E_DATA/curvy_deployed_addresses.json"
 export CURVY_ZK_KEYS_DIR="$PWD/zk-keys/v2"
 ```
 
@@ -111,6 +119,19 @@ Then validate and run:
 ```bash
 just preflight
 just e2e
+```
+
+After the run, stop Blokli before deleting its temporary data. The path guard keeps
+cleanup scoped to the E2E directory created above:
+
+```bash
+docker stop bloklid-anvil-curvy
+if [[ "$BLOKLI_E2E_DATA" == /tmp/blokli-curvy-data.* ]]; then
+  rm -rf -- "$BLOKLI_E2E_DATA"
+  unset BLOKLI_E2E_DATA
+else
+  echo "refusing to remove unexpected path: $BLOKLI_E2E_DATA" >&2
+fi
 ```
 
 The flow covers deposit funding and shielding, note commitment, two aggregation
@@ -170,7 +191,7 @@ just doc-check
 | `Blokli is not ready` | Check the daemon and `BLOKLI_URL`. |
 | `unexpected chain id` | Point the SDK at the local test chain. |
 | GraphQL `Unknown type` | Use a Blokli build with the Curvy schema enabled. |
-| `sync` root mismatch | Verify the configured aggregator address and rebuild the index. |
+| `sync` root mismatch | Verify the aggregator address; if Anvil restarted, restart Blokli with a new `/data` directory. |
 | transaction bypassed Blokli | Treat it as an adapter or routing defect. |
 | linker or `cc` failure | Install a C compiler for `secp256k1-sys`. |
 | `libclang` failure | Install libclang for witness compatibility tests. |

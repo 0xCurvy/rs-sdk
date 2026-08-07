@@ -43,6 +43,21 @@ pub struct Deployed {
     pub portal_factory: String,
 }
 
+fn blokli_client(blokli: Arc<BlokliChain>, deployed: &Deployed, chain_id: u64) -> Arc<CurvyClient> {
+    Arc::new(CurvyClient::new(
+        blokli.clone(),
+        blokli.clone(),
+        blokli.clone(),
+        blokli.clone(),
+        blokli.clone(),
+        blokli.clone(),
+        blokli,
+        deployed.aggregator.clone(),
+        deployed.portal_factory.clone(),
+        chain_id,
+    ))
+}
+
 /// One completed phase of the acceptance flow.
 #[derive(Clone, Debug)]
 pub struct PhaseOutcome {
@@ -295,7 +310,7 @@ pub async fn preflight() -> Result<Preflight> {
     let addresses = address_file()?;
     let deployed = deployed_addresses()?;
 
-    let blokli = BlokliChain::new(&blokli_url);
+    let blokli = Arc::new(BlokliChain::new(&blokli_url));
     if !blokli.is_ready().await {
         bail!("Blokli is not ready at {blokli_url}");
     }
@@ -303,6 +318,10 @@ pub async fn preflight() -> Result<Preflight> {
     if chain_id != 31_337 {
         bail!("unexpected chain id {chain_id}; expected 31337");
     }
+    blokli_client(Arc::clone(&blokli), &deployed, chain_id)
+        .sync()
+        .await
+        .context("Blokli notes index does not match the deployed aggregator")?;
 
     Ok(Preflight {
         blokli_url,
@@ -375,21 +394,14 @@ pub async fn run() -> Result<E2eReport> {
         bail!("unexpected chain id {chain_id}; expected 31337");
     }
     // Use Blokli for all chain access.
-    let client = Arc::new(CurvyClient::new(
-        blokli.clone(),
-        blokli.clone(),
-        blokli.clone(),
-        blokli.clone(),
-        blokli.clone(),
-        blokli.clone(),
-        blokli.clone(),
-        deployed.aggregator,
-        deployed.portal_factory,
-        chain_id,
-    ));
+    let client = blokli_client(blokli.clone(), &deployed, chain_id);
+    client
+        .sync()
+        .await
+        .context("Blokli notes index does not match the deployed aggregator")?;
     record.finish(
         "preflight",
-        format!("3 circuits pinned, Blokli ready on {network}, salt {salt}"),
+        format!("3 circuits pinned, Blokli/index ready on {network}, salt {salt}"),
         Vec::new(),
     );
 
