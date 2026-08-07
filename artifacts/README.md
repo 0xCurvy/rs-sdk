@@ -30,30 +30,6 @@ second trust root, is carried in the artifact header and printed by
 | withdrawal `(2,30)` | `4b105f8650463b07b26f1798ffa7b6e9a9290863c2faf016615577e5cce5dd5a` | 21,502 |
 | aggregation `(2,3,30,6)` | `fdbf71a667f3deff6f76b7ef959fbb92447eff0afb2d4b9c230b341636e626b8` | 27,444 |
 
-## Re-enveloping without a postcard source
-
-`signet reseal` rewrites the envelope and compression of an existing artifact and
-copies the body untouched. It authenticates the input against its pinned digest
-first, then refuses to write unless the result loads through the evaluator with the
-same signal count and source R1CS digest.
-
-```bash
-signet reseal artifacts/signet/pending-5-30.signet.zst \
-  69fa449825732a0958ccd0689ad361d9e8df1223231d8b71932d0efc4a07d8f0 \
-  /tmp/out.bin --envelope signet --compress zstd --level 9
-```
-
-Resealing is bidirectional and preserves the graph body.
-
-What resealing cannot do is change what a graph computes. It will not repair an
-export made under the wrong `--ops`, and it will not re-encode version 1 as version
-2. Both need the postcard source.
-
-## `postcard/*.postcard.bin`
-
-Intermediate output of the graph pipeline, kept so those two graphs can be
-re-exported without re-running circom. Not read at runtime.
-
 ## `graphs/` test fixtures
 
 `graphs/*.graph.bin` are iden3 `circom-witnesscalc` graphs for three circuits.

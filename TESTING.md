@@ -57,13 +57,45 @@ The flow requires:
 - the authenticated proving keys; and
 - chain ID `31337`.
 
+### Bringing up the stack
+
+One container carries anvil, the deployed Curvy suite, and Blokli with Curvy indexing
+enabled. It deploys unconditionally, so there is no flag to set.
+
+```bash
+cd ~/Projects/blokli && git add -N . && nix build -L .#docker-bloklid-anvil-curvy-x86_64-linux --out-link result-curvy-image
+```
+
+```bash
+cd ~/Projects/blokli && docker load < result-curvy-image
+```
+
+```bash
+mkdir -p /tmp/blokli-curvy-data && docker run --rm --name bloklid-anvil-curvy -e ANVIL_HOST=0.0.0.0 -p 8545:8545 -p 8080:8080 -v /tmp/blokli-curvy-data:/data bloklid-anvil-curvy:latest
+```
+
+The manifest lands at `/tmp/blokli-curvy-data/curvy_deployed_addresses.json`. Nix
+flakes copy tracked files only, so `git add -N` stages any new file for the build.
+
+### Running it
+
 Set the runtime paths before starting:
 
 ```bash
 export BLOKLI_URL=http://127.0.0.1:8080
-export CURVY_ADDRESSES=/path/to/curvy_deployed_addresses.json
+export CURVY_ADDRESSES=/tmp/blokli-curvy-data/curvy_deployed_addresses.json
 export CURVY_ZK_KEYS_DIR="$PWD/zk-keys/v2"
 ```
+
+Confirm the deploy registered both PIX verifiers before proving anything:
+
+```bash
+jq 'keys' "$CURVY_ADDRESSES"
+```
+
+`CurvyAggregator#CurvyPixAggregationVerifier`,
+`CurvyAggregator#CurvyPixMultiOwnerWithdrawalVerifier` and
+`PortalFactoryV2#PortalFactory` must all be present.
 
 Check readiness and the required GraphQL fields:
 

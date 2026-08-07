@@ -12,7 +12,7 @@ cd "$HERE"
 
 # Optional release asset base URL.
 # https://github.com/0xCurvy/rs-sdk/releases/download/<tag>
-DEFAULT_KEYS_URL=""
+DEFAULT_KEYS_URL="https://github.com/0xCurvy/rs-sdk/releases/download/v0.1.0"
 
 KEYS_DIR="$HERE/zk-keys/v2"
 
