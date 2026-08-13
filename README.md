@@ -82,14 +82,18 @@ or provide chain and transaction adapters. Normalize the indexer result to a
 ```rust
 use curvy_sdk::{Account, PendingNote, scan_pending_note};
 
-let discovered = scan_pending_note(&account, &pending_note)?;
+if let Some(discovered) = scan_pending_note(&account, &pending_note)? {
+    persist_until_commit(discovered.into_owned_note())?;
+}
 ```
 
 Contract `PendingNotes` events contain parallel arrays and may hold multiple
 notes. `PendingNotesEvent::notes()` validates and normalizes those arrays;
-`scan_pending_event` scans the complete event and returns every owned note. The
-existing `CurvyClient::scan` remains available when the SDK itself should query
-all indexed events.
+`scan_pending_event` scans the complete event and returns every owned note. A
+successful discovery contains the complete `OwnedNote` required for durable
+pending-to-committed correlation and later spending. The existing
+`CurvyClient::scan` remains available when the SDK itself should query all indexed
+events.
 
 ## Output shape
 

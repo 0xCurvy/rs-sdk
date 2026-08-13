@@ -12,16 +12,43 @@ use curvy_core::{
 };
 use curvy_types::{PendingNote, PendingNotesEvent};
 
-use crate::account::{Account, parse_fr_decimal, shared_secret_from_spending_pub_key};
+use crate::account::{Account, OwnedNote, parse_fr_decimal, shared_secret_from_spending_pub_key};
 
 /// A discovered note that passed ownership and note-ID integrity checks.
 #[derive(Clone, Debug)]
 pub struct Discovered {
+    /// Recomputed identifier of `owned_note`, retained as a convenient lookup key.
     pub note_id: Fr,
-    pub amount: Fr,
-    pub token: Fr,
-    pub shared_secret: Fr,
+    /// Complete private note material to persist until commitment and later spend.
+    pub owned_note: OwnedNote,
     pub is_plaintext: bool,
+}
+
+impl Discovered {
+    /// Consumes the discovery result and returns the spendable note material.
+    pub fn into_owned_note(self) -> OwnedNote {
+        self.owned_note
+    }
+}
+
+impl std::ops::Deref for Discovered {
+    type Target = OwnedNote;
+
+    fn deref(&self) -> &Self::Target {
+        &self.owned_note
+    }
+}
+
+impl AsRef<OwnedNote> for Discovered {
+    fn as_ref(&self) -> &OwnedNote {
+        &self.owned_note
+    }
+}
+
+impl From<Discovered> for OwnedNote {
+    fn from(discovered: Discovered) -> Self {
+        discovered.into_owned_note()
+    }
 }
 
 /// Checks one already-decoded pending note for ownership by `account`.
@@ -66,14 +93,14 @@ fn scan_pending_notes(account: &Account, notes: &[PendingNote]) -> Result<Vec<Di
         .collect::<Vec<_>>();
     let view_tags = notes
         .iter()
-        .map(|note| {
-            let tag =
-                u16::try_from(note.view_tag).context("pending note view tag is outside uint16")?;
-            Ok(format!("{tag:02x}"))
-        })
+        .map(|note| u16::try_from(note.view_tag).context("pending note view tag is outside uint16"))
         .collect::<Result<Vec<_>>>()?;
+    let scan_view_tags = view_tags
+        .iter()
+        .map(|tag| format!("{tag:02x}"))
+        .collect::<Vec<_>>();
 
-    let matches = stealth::scan(&account.k, &account.v, &ephemeral_keys, &view_tags)
+    let matches = stealth::scan(&account.k, &account.v, &ephemeral_keys, &scan_view_tags)
         .map_err(|error| anyhow::anyhow!("stealth scan: {error}"))?;
 
     let mut discovered = Vec::with_capacity(matches.len());
@@ -87,6 +114,10 @@ fn scan_pending_notes(account: &Account, notes: &[PendingNote]) -> Result<Vec<Di
             .with_context(|| format!("stealth match index {index} is out of bounds"))?;
         let shared_secret = shared_secret_from_spending_pub_key(&matched.spending_pub_key)
             .context("parse scanned shared-secret point")?;
+        let ephemeral_key = (
+            parse_fr_decimal(&note.ephemeral_key[0], "ephemeral key x")?,
+            parse_fr_decimal(&note.ephemeral_key[1], "ephemeral key y")?,
+        );
 
         let (amount, token) = if note.is_plaintext {
             (
@@ -95,14 +126,8 @@ fn scan_pending_notes(account: &Account, notes: &[PendingNote]) -> Result<Vec<Di
             )
         } else {
             let shared_secret_bytes = fr_to_biguint(&shared_secret);
-            let ephemeral_x = fr_to_biguint(&parse_fr_decimal(
-                &note.ephemeral_key[0],
-                "ephemeral key x",
-            )?);
-            let ephemeral_y = fr_to_biguint(&parse_fr_decimal(
-                &note.ephemeral_key[1],
-                "ephemeral key y",
-            )?);
+            let ephemeral_x = fr_to_biguint(&ephemeral_key.0);
+            let ephemeral_y = fr_to_biguint(&ephemeral_key.1);
             decrypt_amount_token(
                 parse_fr_decimal(&note.amount, "encrypted note amount")?,
                 parse_fr_decimal(&note.token, "encrypted note token")?,
@@ -118,9 +143,14 @@ fn scan_pending_notes(account: &Account, notes: &[PendingNote]) -> Result<Vec<Di
         if discovered_id == parse_fr_decimal(&note.note_id, "pending note id")? {
             discovered.push(Discovered {
                 note_id: discovered_id,
-                amount,
-                token,
-                shared_secret,
+                owned_note: OwnedNote {
+                    owner_pub: account.bjj_pub,
+                    shared_secret,
+                    ephemeral_key,
+                    view_tag: view_tags[index],
+                    amount,
+                    token,
+                },
                 is_plaintext: note.is_plaintext,
             });
         }
@@ -204,6 +234,21 @@ mod tests {
         assert_eq!(discovered.amount, Fr::from(42_u64));
         assert_eq!(discovered.token, Fr::from(7_u64));
         assert!(!discovered.is_plaintext);
+        let owned_note = discovered.into_owned_note();
+        assert_eq!(owned_note.owner_pub, owner.bjj_pub);
+        assert_eq!(
+            owned_note.note_id(),
+            parse_fr_decimal(&note.note_id, "fixture note id")?
+        );
+        assert_eq!(owned_note.view_tag, u16::try_from(note.view_tag)?);
+        assert_eq!(
+            owned_note.ephemeral_key.0,
+            parse_fr_decimal(&note.ephemeral_key[0], "fixture x")?
+        );
+        assert_eq!(
+            owned_note.ephemeral_key.1,
+            parse_fr_decimal(&note.ephemeral_key[1], "fixture y")?
+        );
         assert!(scan_pending_note(&account(2), &note)?.is_none());
         Ok(())
     }
