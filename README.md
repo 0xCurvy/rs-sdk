@@ -9,10 +9,9 @@ It covers four operations end to end:
 3. **aggregate** up to two input notes into nine regular outputs plus one fee output;
 4. **withdraw** up to ten notes held by unrelated BabyJubJub scalars in a single proof.
 
-There are two entry points. [`CurvyClient`](curvy-sdk/src/client.rs) is the direct
-API. [`CurvyDepositPool`](curvy-deposit-pool/src/pool.rs) implements
-`hopr_api::chain::DepositPool`, so a HOPR node can substitute it for
-`NonAnonymousDepositPool` at the construction site and change nothing else.
+[`CurvyClient`](curvy-sdk/src/client.rs) is the direct API. The HOPR
+`DepositPool` integration lives in the `hopr-strategy` repository so this SDK
+stays independent of HOPR's protocol lifecycle and allocation identifiers.
 
 ## Prerequisites
 
@@ -42,9 +41,9 @@ Proving keys are resolved inside the repo at `zk-keys/v2` and fetched on demand,
 there is no key path to configure. Driving cargo directly still works, and then
 `CURVY_ZK_KEYS_DIR` is yours to set.
 
-The stack must deploy verifier profiles `(2,9)` and `(10)`. Thirteen phases run:
-deposit, two aggregation fan-outs, a ten-owner withdrawal, then the four
-`DepositPool` methods. Each prints as it completes, and the summary lists every
+The stack must deploy verifier profiles `(2,9)` and `(10)`. Nine phases exercise
+deposit, two aggregation fan-outs, a ten-owner withdrawal, commitment, and indexed
+nullifier verification. Each prints as it completes, and the summary lists every
 transaction with its label, backend and hash.
 
 See [TESTING.md](TESTING.md) for stack requirements and validation commands.
@@ -61,7 +60,6 @@ Without it each run generates a unique note salt.
 | crate | responsibility |
 |---|---|
 | `curvy-sdk` | deposit, pending-note commit, aggregation, withdrawal, note sync |
-| `curvy-deposit-pool` | `hopr_api::chain::DepositPool` over `CurvyClient`, with batching and persistence |
 | `curvy-witnesscalc` | circuit input assembly, artifact selection, witness calculation, Groth16 proving |
 | `curvy-chain-blokli` | Blokli GraphQL index and `sendTransactionSync` submission |
 | `curvy-chain-rpc` | direct on-chain reads and plain-transfer fallback; not on the acceptance path |
@@ -71,28 +69,6 @@ Without it each run generates a unique note salt.
 
 Cryptographic primitives and proving are provided by the `curvy-*` crates. This
 workspace assembles circuit inputs and coordinates chain operations.
-
-## Things that will bite you
-
-**`deposit_funds_to` returns on enqueue, not on settlement.** Curvy's aggregation
-circuit takes 2 inputs and 9 regular outputs, so one proof serves seven recipients
-plus change plus a relayer note. Use `notify_deposit` to await settlement.
-
-**Partial withdrawal delivers whole notes.** Curvy notes are atomic; splitting one
-needs an extra aggregation proof authorised by the depositor's key. Ask for an
-amount no subset matches exactly and you get the smallest total that still covers
-it, with the excess landing at the same destination. Only a genuinely insufficient
-balance fails.
-
-**The pool must be funded before the first `deposit_funds_to`.** It spends
-committed notes it already owns and the trait has no funding hook, so something has
-to seed it. A long-running node wants a replenishment policy.
-
-**Recovery is conservative.** Lost submission responses are reconciled from direct
-note/nullifier state, and shield/commit/withdrawal stages are persisted. A hard process
-death inside aggregation proving/submission can still precede persistence of its random
-outputs; that reservation fails closed for manual reconciliation instead of risking a
-second spend.
 
 ## Output shape
 
@@ -185,8 +161,3 @@ Check a machine before proving anything on it:
 ```bash
 ./scripts/preflight.sh
 ```
-
-## API limitation
-
-`DepositPool` does not receive a `PixAddressId`, so settlement idempotency remains
-outside this adapter.

@@ -9,7 +9,6 @@ members = [
     "curvy-chain-rpc",
     "curvy-sdk",
     "curvy-e2e",
-    "curvy-deposit-pool",
 ]
 
 [workspace.package]

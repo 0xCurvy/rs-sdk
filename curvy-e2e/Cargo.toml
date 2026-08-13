@@ -16,9 +16,6 @@ curvy-core = { workspace = true }
 curvy-sdk = { path = "../curvy-sdk" }
 curvy-chain-api = { path = "../curvy-chain-api" }
 curvy-chain-blokli = { path = "../curvy-chain-blokli" }
-curvy-deposit-pool = { path = "../curvy-deposit-pool" }
-hopr-api = { version = "1.18.0", features = ["chain", "types-chain"] }
-hopr-types = { version = "2.1.1", features = ["crypto"] }
 curvy-types = { path = "../curvy-types" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
