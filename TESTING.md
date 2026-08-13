@@ -136,7 +136,7 @@ fi
 
 The flow covers deposit funding and shielding, note commitment, two aggregation
 proofs, relayer-note discovery, multi-owner withdrawal, indexed nullifiers, and the
-`DepositPool` interface. Protocol transactions must report Blokli as their backend.
+direct SDK interfaces. Protocol transactions must report Blokli as their backend.
 
 ## Test organization
 

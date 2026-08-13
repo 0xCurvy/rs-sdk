@@ -126,7 +126,7 @@ preflight-sdk: fetch-keys
 
 # Pass a salt to replay a run against a fresh chain.
 
-# Run the thirteen-phase acceptance flow against a live Blokli stack
+# Run the nine-phase acceptance flow against a live Blokli stack
 e2e salt="": fetch-keys
     #!/usr/bin/env bash
     set -euo pipefail

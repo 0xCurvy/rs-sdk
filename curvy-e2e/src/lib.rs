@@ -24,6 +24,8 @@ const ETH_TOKEN: u64 = 1;
 const FUNDING_GROSS_WEI: u128 = 2_000_000_000_000_000_000;
 const ALLOCATION_WEI: u128 = 50_000_000_000_000_000;
 const OWNER_COUNT: usize = 10;
+/// Number of recorded phases in the live acceptance flow.
+pub const E2E_PHASE_COUNT: usize = 9;
 /// Allocations in the first fan-out proof.
 const FIRST_FANOUT: usize = 7;
 /// Test relayer reimbursement.
@@ -152,8 +154,9 @@ impl Recorder {
             ledger,
         };
         println!(
-            "[{}/13] PASS {} ({:.1}s) - {}",
+            "[{}/{}] PASS {} ({:.1}s) - {}",
             self.phases.len() + 1,
+            E2E_PHASE_COUNT,
             outcome.name,
             outcome.elapsed.as_secs_f64(),
             outcome.detail

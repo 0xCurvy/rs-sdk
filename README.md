@@ -10,15 +10,18 @@ It covers four operations end to end:
 4. **withdraw** up to ten notes held by unrelated BabyJubJub scalars in a single proof.
 
 [`CurvyClient`](curvy-sdk/src/client.rs) is the direct API. The HOPR
-`DepositPool` integration lives in the `hopr-strategy` repository so this SDK
-stays independent of HOPR's protocol lifecycle and allocation identifiers.
+`DepositPool` implementation lives in
+[`hopr-impls`](https://github.com/hoprnet/hopr-impls), and
+[`hopr-strategy`](https://github.com/hoprnet/hopr-strategy) injects it into its
+generic strategy. This SDK stays independent of HOPR's protocol lifecycle and
+allocation identifiers.
 
 ## Prerequisites
 
 | what | where | why |
 |---|---|---|
 | Rust 1.94 | `rust-toolchain.toml` | pinned; rustup installs it on first build |
-| A C compiler | `cc` on PATH | one dependency needs it, `secp256k1-sys` via `hopr-types` |
+| A C compiler | `cc` on PATH | native cryptography dependencies need it |
 | Proving keys | `zk-keys/v2` in this repo | 249 MB, gitignored; fetched and digest-checked automatically by any recipe that needs them |
 | A Curvy-enabled Blokli + Anvil stack | `BLOKLI_URL` | the only backend this SDK talks to |
 
@@ -69,6 +72,24 @@ Without it each run generates a unique note salt.
 
 Cryptographic primitives and proving are provided by the `curvy-*` crates. This
 workspace assembles circuit inputs and coordinates chain operations.
+
+## Scanning an already-indexed note
+
+Code that already has a pending note does not need to construct a `CurvyClient`
+or provide chain and transaction adapters. Normalize the indexer result to a
+`PendingNote`, then use the pure scanner:
+
+```rust
+use curvy_sdk::{Account, PendingNote, scan_pending_note};
+
+let discovered = scan_pending_note(&account, &pending_note)?;
+```
+
+Contract `PendingNotes` events contain parallel arrays and may hold multiple
+notes. `PendingNotesEvent::notes()` validates and normalizes those arrays;
+`scan_pending_event` scans the complete event and returns every owned note. The
+existing `CurvyClient::scan` remains available when the SDK itself should query
+all indexed events.
 
 ## Output shape
 

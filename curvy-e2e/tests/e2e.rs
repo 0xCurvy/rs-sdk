@@ -8,7 +8,11 @@ async fn deposit_aggregate_and_withdraw_through_blokli() {
         .expect("strict Curvy E2E flow failed");
     print!("{}", report.summary());
 
-    assert_eq!(report.phases.len(), 13, "every phase must be recorded");
+    assert_eq!(
+        report.phases.len(),
+        curvy_e2e::E2E_PHASE_COUNT,
+        "every phase must be recorded"
+    );
     assert!(report.delivered_wei > 0, "withdrawal delivered nothing");
 
     // Every transaction must use Blokli.

@@ -5,12 +5,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
-use curvy_core::cipher::decrypt_amount_token;
 use curvy_core::eddsa::ScalarSigningKey;
 use curvy_core::field::{Fr, fr_from_biguint, fr_to_biguint, fr_to_dec};
 use curvy_core::imt::Imt;
-use curvy_core::note::{note_id, owner_hash};
-use curvy_core::stealth;
 use curvy_core::witness::{
     KnownOwner, NoteSigner, Proof, SeedNoteSigner, build_aggregation, build_pending_commitment,
     build_withdrawal_with_signer,
@@ -25,9 +22,9 @@ use curvy_chain_api::{
     TxSubmitter,
 };
 
-use crate::account::{
-    Account, Identity, OwnedNote, parse_fr_decimal, shared_secret_from_spending_pub_key,
-};
+use crate::account::{Account, Identity, OwnedNote, parse_fr_decimal};
+pub use crate::scan::Discovered;
+use crate::scan::scan_pending_events;
 use crate::send::{fee_note, seal_known_owner, seal_note, shield_net_amount, zero_pad_note};
 
 const TREE_DEPTH: usize = 30;
@@ -87,16 +84,6 @@ pub enum Route {
     Blokli,
     /// direct `eth_sendRawTransaction` (the fallback / operator path).
     Direct,
-}
-
-/// A discovered note (post integrity-gate).
-#[derive(Clone, Debug)]
-pub struct Discovered {
-    pub note_id: Fr,
-    pub amount: Fr,
-    pub token: Fr,
-    pub shared_secret: Fr,
-    pub is_plaintext: bool,
 }
 
 /// A per-tx ledger entry.
@@ -1536,91 +1523,15 @@ impl CurvyClient {
 
     // Note scanning.
 
-    /// Scan pending events for notes owned by `account`.
+    /// Fetch and scan all indexed pending events for notes owned by `account`.
+    ///
+    /// Call [`crate::scan_pending_note`] or [`crate::scan_pending_event`] instead
+    /// when the pending-note data has already been fetched. Those pure functions
+    /// do not require a client or any chain and transaction adapters.
     pub async fn scan(&self, account: &Account) -> Result<Vec<Discovered>> {
         let head = self.notes.head_block().await?;
         let events = self.notes.pending_notes(0, head).await?;
-
-        let mut rs = Vec::new();
-        let mut tags = Vec::new();
-        // (note_id, enc_amount, enc_token, is_plaintext, eph_x, eph_y)
-        let mut meta: Vec<(String, String, String, bool, String, String)> = Vec::new();
-        for ev in &events {
-            let len = ev.note_ids.len();
-            anyhow::ensure!(
-                ev.ephemeral_keys[0].len() == len
-                    && ev.ephemeral_keys[1].len() == len
-                    && ev.view_tags.len() == len
-                    && ev.amounts.len() == len
-                    && ev.tokens.len() == len
-                    && ev.is_plaintext.len() == len,
-                "PendingNotes event {} has inconsistent parallel-array lengths",
-                ev.tx_hash
-            );
-            anyhow::ensure!(
-                ev.view_tags.iter().all(|tag| u16::try_from(*tag).is_ok()),
-                "PendingNotes event {} has a view tag outside uint16",
-                ev.tx_hash
-            );
-            for i in 0..ev.note_ids.len() {
-                let ex = ev.ephemeral_keys[0][i].clone();
-                let ey = ev.ephemeral_keys[1][i].clone();
-                rs.push(format!("{ex}.{ey}"));
-                tags.push(format!("{:02x}", ev.view_tags[i]));
-                meta.push((
-                    ev.note_ids[i].clone(),
-                    ev.amounts[i].clone(),
-                    ev.tokens[i].clone(),
-                    ev.is_plaintext[i],
-                    ex,
-                    ey,
-                ));
-            }
-        }
-
-        let matches = stealth::scan(&account.k, &account.v, &rs, &tags)
-            .map_err(|e| anyhow::anyhow!("stealth scan: {e}"))?;
-
-        let mut out = Vec::new();
-        for m in matches {
-            let index: usize = m.index.try_into().context("stealth match index overflow")?;
-            let (note_id_dec, enc_amount, enc_token, is_plain, ex, ey) = meta
-                .get(index)
-                .with_context(|| format!("stealth match index {index} is out of bounds"))?;
-            let shared_secret = shared_secret_from_spending_pub_key(&m.spending_pub_key)
-                .context("parse scanned shared-secret point")?;
-
-            let (amount, token) = if *is_plain {
-                (
-                    parse_fr_decimal(enc_amount, "plaintext note amount")?,
-                    parse_fr_decimal(enc_token, "plaintext note token")?,
-                )
-            } else {
-                let ss = fr_to_biguint(&shared_secret);
-                let ebx = fr_to_biguint(&parse_fr_decimal(ex, "ephemeral key x")?);
-                let eby = fr_to_biguint(&parse_fr_decimal(ey, "ephemeral key y")?);
-                decrypt_amount_token(
-                    parse_fr_decimal(enc_amount, "encrypted note amount")?,
-                    parse_fr_decimal(enc_token, "encrypted note token")?,
-                    &ss,
-                    (&ebx, &eby),
-                )
-            };
-
-            // Verify the note id before returning a match.
-            let oh = owner_hash(account.bjj_pub, shared_secret);
-            let nid = note_id(oh, amount, token);
-            if nid == parse_fr_decimal(note_id_dec, "pending note id")? {
-                out.push(Discovered {
-                    note_id: nid,
-                    amount,
-                    token,
-                    shared_secret,
-                    is_plaintext: *is_plain,
-                });
-            }
-        }
-        Ok(out)
+        scan_pending_events(account, &events)
     }
 }
 

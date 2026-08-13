@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 const USAGE: &str = "\
 curvy-e2e - acceptance flow against a local Blokli stack
 
-  curvy-e2e              run all thirteen phases
+  curvy-e2e              run all nine phases
   curvy-e2e --preflight  check artifacts, proving keys and Blokli, then exit
 
 Environment:
