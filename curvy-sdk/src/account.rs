@@ -32,6 +32,85 @@ pub struct Identity {
     pub bjj_pub: (Fr, Fr),
 }
 
+/// Public Curvy stealth identity used by a sender to make a note privately
+/// discoverable.
+///
+/// This deliberately carries no BabyJubJub owner key. Protocols such as PIX can
+/// therefore use a separately derived, threshold-controlled note owner while
+/// retaining Curvy's private view-tag scanning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewerIdentity {
+    /// Public secp256k1 spend meta-key `K` as `"x.y"`.
+    pub big_k: String,
+    /// Public BN254 view meta-key `V` as `"x.y"`.
+    pub big_v: String,
+}
+
+/// A privately discoverable note recipient whose spending authority is an
+/// independently supplied BabyJubJub public key.
+#[derive(Clone, Debug)]
+pub struct ScanRecipient {
+    pub viewer: ViewerIdentity,
+    pub owner_pub: (Fr, Fr),
+}
+
+impl ScanRecipient {
+    pub const fn new(viewer: ViewerIdentity, owner_pub: (Fr, Fr)) -> Self {
+        Self { viewer, owner_pub }
+    }
+}
+
+/// Scan-only Curvy capability.
+///
+/// A viewer holds the BN254 view scalar `v` and the public secp256k1 meta-key
+/// `K`. It can identify and decrypt matching notes through `viewer_scan`, but it
+/// does not contain either the stealth spend scalar `k` or the BabyJubJub key
+/// that signs a withdrawal.
+#[derive(Clone)]
+pub struct Viewer {
+    /// BN254 view private key in hexadecimal.
+    pub v: String,
+    /// Public secp256k1 spend meta-key `K` as `"x.y"`.
+    pub big_k: String,
+}
+
+impl std::fmt::Debug for Viewer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Viewer")
+            .field("v", &"<redacted>")
+            .field("big_k", &self.big_k)
+            .finish()
+    }
+}
+
+impl Viewer {
+    /// Validates and constructs a scan-only capability.
+    pub fn new(v: impl Into<String>, big_k: impl Into<String>) -> Result<Self> {
+        let viewer = Self {
+            v: v.into(),
+            big_k: big_k.into(),
+        };
+        stealth::viewer_scan(&viewer.v, &viewer.big_k, &[], &[])
+            .map_err(|error| anyhow::anyhow!("invalid Curvy viewer: {error}"))?;
+        Ok(viewer)
+    }
+}
+
+impl ViewerIdentity {
+    /// Validates and constructs the public half of a scan identity.
+    pub fn new(big_k: impl Into<String>, big_v: impl Into<String>) -> Result<Self> {
+        let identity = Self {
+            big_k: big_k.into(),
+            big_v: big_v.into(),
+        };
+        // A fixed non-zero ephemeral scalar validates both public points without
+        // consuming randomness or creating protocol state.
+        stealth::send_with_r("1", &identity.big_k, &identity.big_v)
+            .map_err(|error| anyhow::anyhow!("invalid Curvy viewer identity: {error}"))?;
+        Ok(identity)
+    }
+}
+
 impl Account {
     /// From explicit stealth private keys `(k, v)` (hex). Derives the public meta-keys
     /// and the BabyJubJub owner key.

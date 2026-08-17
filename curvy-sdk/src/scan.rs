@@ -12,7 +12,9 @@ use curvy_core::{
 };
 use curvy_types::{PendingNote, PendingNotesEvent};
 
-use crate::account::{Account, OwnedNote, parse_fr_decimal, shared_secret_from_spending_pub_key};
+use crate::account::{
+    Account, OwnedNote, Viewer, parse_fr_decimal, shared_secret_from_spending_pub_key,
+};
 
 /// A discovered note that passed ownership and note-ID integrity checks.
 #[derive(Clone, Debug)]
@@ -63,6 +65,24 @@ pub fn scan_pending_note(account: &Account, note: &PendingNote) -> Result<Option
         .next())
 }
 
+/// Checks one pending note using a scan-only Curvy capability and an independent
+/// BabyJubJub note owner.
+///
+/// `viewer` can identify and decrypt the note but cannot sign a withdrawal.
+/// Spending requires the private key corresponding to `owner_pub`, which PIX
+/// reconstructs separately from SSA shares.
+pub fn scan_pending_note_with_viewer(
+    viewer: &Viewer,
+    owner_pub: (Fr, Fr),
+    note: &PendingNote,
+) -> Result<Option<Discovered>> {
+    Ok(
+        scan_pending_notes_with_viewer(viewer, owner_pub, std::slice::from_ref(note))?
+            .into_iter()
+            .next(),
+    )
+}
+
 /// Scans every note item contained in one contract event.
 ///
 /// [`PendingNotesEvent`] uses parallel arrays and can contain more than one note,
@@ -87,6 +107,41 @@ pub(crate) fn scan_pending_events(
 }
 
 fn scan_pending_notes(account: &Account, notes: &[PendingNote]) -> Result<Vec<Discovered>> {
+    let matches = scan_matches(notes, |ephemeral_keys, scan_view_tags| {
+        stealth::scan(&account.k, &account.v, ephemeral_keys, scan_view_tags)
+            .map(|matches| {
+                matches
+                    .into_iter()
+                    .map(|matched| (matched.index, matched.spending_pub_key))
+                    .collect()
+            })
+            .map_err(|error| anyhow::anyhow!("stealth scan: {error}"))
+    })?;
+    discover_pending_notes(account.bjj_pub, notes, matches)
+}
+
+fn scan_pending_notes_with_viewer(
+    viewer: &Viewer,
+    owner_pub: (Fr, Fr),
+    notes: &[PendingNote],
+) -> Result<Vec<Discovered>> {
+    let matches = scan_matches(notes, |ephemeral_keys, scan_view_tags| {
+        stealth::viewer_scan(&viewer.v, &viewer.big_k, ephemeral_keys, scan_view_tags)
+            .map(|matches| {
+                matches
+                    .into_iter()
+                    .map(|matched| (matched.index, matched.spending_pub_key))
+                    .collect()
+            })
+            .map_err(|error| anyhow::anyhow!("Curvy viewer scan: {error}"))
+    })?;
+    discover_pending_notes(owner_pub, notes, matches)
+}
+
+fn scan_matches(
+    notes: &[PendingNote],
+    scan: impl FnOnce(&[String], &[String]) -> Result<Vec<(u32, String)>>,
+) -> Result<Vec<(u32, String)>> {
     let ephemeral_keys = notes
         .iter()
         .map(|note| format!("{}.{}", note.ephemeral_key[0], note.ephemeral_key[1]))
@@ -100,19 +155,23 @@ fn scan_pending_notes(account: &Account, notes: &[PendingNote]) -> Result<Vec<Di
         .map(|tag| format!("{tag:02x}"))
         .collect::<Vec<_>>();
 
-    let matches = stealth::scan(&account.k, &account.v, &ephemeral_keys, &scan_view_tags)
-        .map_err(|error| anyhow::anyhow!("stealth scan: {error}"))?;
+    scan(&ephemeral_keys, &scan_view_tags)
+}
 
+fn discover_pending_notes(
+    owner_pub: (Fr, Fr),
+    notes: &[PendingNote],
+    matches: Vec<(u32, String)>,
+) -> Result<Vec<Discovered>> {
     let mut discovered = Vec::with_capacity(matches.len());
-    for matched in matches {
-        let index: usize = matched
-            .index
+    for (matched_index, spending_pub_key) in matches {
+        let index: usize = matched_index
             .try_into()
             .context("stealth match index overflow")?;
         let note = notes
             .get(index)
             .with_context(|| format!("stealth match index {index} is out of bounds"))?;
-        let shared_secret = shared_secret_from_spending_pub_key(&matched.spending_pub_key)
+        let shared_secret = shared_secret_from_spending_pub_key(&spending_pub_key)
             .context("parse scanned shared-secret point")?;
         let ephemeral_key = (
             parse_fr_decimal(&note.ephemeral_key[0], "ephemeral key x")?,
@@ -139,15 +198,16 @@ fn scan_pending_notes(account: &Account, notes: &[PendingNote]) -> Result<Vec<Di
         // A view-tag match is only a cheap candidate filter. Recomputing the ID is
         // the integrity gate that prevents false positives and corrupted ciphertext
         // from becoming an owned note.
-        let discovered_id = note_id(owner_hash(account.bjj_pub, shared_secret), amount, token);
+        let discovered_id = note_id(owner_hash(owner_pub, shared_secret), amount, token);
         if discovered_id == parse_fr_decimal(&note.note_id, "pending note id")? {
             discovered.push(Discovered {
                 note_id: discovered_id,
                 owned_note: OwnedNote {
-                    owner_pub: account.bjj_pub,
+                    owner_pub,
                     shared_secret,
                     ephemeral_key,
-                    view_tag: view_tags[index],
+                    view_tag: u16::try_from(note.view_tag)
+                        .context("pending note view tag is outside uint16")?,
                     amount,
                     token,
                 },
@@ -166,7 +226,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::send::seal_note;
+    use crate::send::{seal_note, seal_note_for_owner};
 
     fn account(byte: u8) -> Account {
         Account::from_poc_raw_private_key(&hex::encode([byte; 32])).expect("valid account fixture")
@@ -279,6 +339,53 @@ mod tests {
 
         pending_event.tokens.pop();
         assert!(scan_pending_event(&owner, &pending_event).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn viewer_discovers_a_note_but_does_not_own_it() -> Result<()> {
+        let (k, v, big_k, big_v) = stealth::new_meta()
+            .map_err(|error| anyhow::anyhow!("generate viewer fixture: {error}"))?;
+        let viewer = Viewer::new(v, big_k.clone())?;
+        let viewer_identity = crate::account::ViewerIdentity::new(big_k, big_v)?;
+        let owner = account(9);
+        let owned = seal_note_for_owner(
+            &viewer_identity,
+            owner.bjj_pub,
+            Fr::from(77_u64),
+            Fr::from(3_u64),
+        )?;
+        let encrypted = encrypt_amount_token(
+            owned.amount,
+            owned.token,
+            &fr_to_biguint(&owned.shared_secret),
+            (
+                &fr_to_biguint(&owned.ephemeral_key.0),
+                &fr_to_biguint(&owned.ephemeral_key.1),
+            ),
+        );
+        let note = PendingNote {
+            note_id: fr_to_dec(&owned.note_id()),
+            ephemeral_key: [
+                fr_to_dec(&owned.ephemeral_key.0),
+                fr_to_dec(&owned.ephemeral_key.1),
+            ],
+            view_tag: owned.view_tag.into(),
+            token: fr_to_dec(&encrypted.encrypted_token),
+            amount: fr_to_dec(&encrypted.encrypted_amount),
+            is_plaintext: false,
+        };
+
+        let discovered = scan_pending_note_with_viewer(&viewer, owner.bjj_pub, &note)?
+            .context("viewer must discover the SSA-owned note")?;
+
+        assert_eq!(discovered.owner_pub, owner.bjj_pub);
+        assert_eq!(discovered.amount, Fr::from(77_u64));
+        assert_ne!(
+            discovered.owner_pub,
+            curvy_core::eddsa::pub_from_private_key_hex(&k),
+            "the viewer must not become the note owner",
+        );
         Ok(())
     }
 }

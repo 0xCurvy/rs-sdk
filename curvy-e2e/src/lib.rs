@@ -9,9 +9,9 @@ use anyhow::{Context, Result, bail};
 use curvy_chain_api::NoteIndexSource;
 use curvy_chain_blokli::BlokliChain;
 use curvy_core::eddsa::ScalarSigningKey;
-use curvy_core::field::{Bn254Fr, Fr, fr_to_biguint, fr_to_dec};
-use curvy_core::witness::KnownOwner;
-use curvy_sdk::{Account, CurvyClient, OwnedNote, Route, TxLedger};
+use curvy_core::field::{Fr, fr_to_biguint, fr_to_dec};
+use curvy_core::stealth;
+use curvy_sdk::{Account, CurvyClient, OwnedNote, Route, ScanRecipient, TxLedger, ViewerIdentity};
 
 const OPERATOR_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -240,11 +240,13 @@ fn scalar_key(index: usize) -> Result<ScalarSigningKey> {
         .map_err(|error| anyhow::anyhow!(error))
 }
 
-fn allocation_owner(key: &ScalarSigningKey, index: usize, salt: u64) -> KnownOwner {
-    KnownOwner::new(
-        *key.verifying_key(),
-        Bn254Fr::from_fr(Fr::from(salt.wrapping_add(index as u64))),
-    )
+fn allocation_recipient(key: &ScalarSigningKey) -> Result<ScanRecipient> {
+    let (_unused_spend_secret, _view_secret, spend_meta_key, view_public_key) = stealth::new_meta()
+        .map_err(|error| anyhow::anyhow!("generate allocation viewer: {error}"))?;
+    Ok(ScanRecipient::new(
+        ViewerIdentity::new(spend_meta_key, view_public_key)?,
+        key.verifying_key().as_tuple(),
+    ))
 }
 
 /// Authenticate all required artifacts.
@@ -443,9 +445,8 @@ pub async fn run() -> Result<E2eReport> {
         .collect::<Result<Vec<_>>>()?;
     let owners = keys
         .iter()
-        .enumerate()
-        .map(|(index, key)| allocation_owner(key, index, salt))
-        .collect::<Vec<_>>();
+        .map(allocation_recipient)
+        .collect::<Result<Vec<_>>>()?;
 
     // Relayer reimbursement output.
     let relayer_account = Account::from_poc_raw_private_key(RELAYER_SEED)?;
@@ -459,7 +460,7 @@ pub async fn run() -> Result<E2eReport> {
     // First aggregation.
     let first_allocations = owners[..FIRST_FANOUT]
         .iter()
-        .copied()
+        .cloned()
         .map(|owner| (owner, ALLOCATION_WEI))
         .collect::<Vec<_>>();
     let first = client
@@ -511,7 +512,7 @@ pub async fn run() -> Result<E2eReport> {
     // Second aggregation.
     let second_allocations = owners[FIRST_FANOUT..]
         .iter()
-        .copied()
+        .cloned()
         .map(|owner| (owner, ALLOCATION_WEI))
         .collect::<Vec<_>>();
     let second = client

@@ -25,7 +25,9 @@ use curvy_chain_api::{
 use crate::account::{Account, Identity, OwnedNote, parse_fr_decimal};
 pub use crate::scan::Discovered;
 use crate::scan::scan_pending_events;
-use crate::send::{fee_note, seal_known_owner, seal_note, shield_net_amount, zero_pad_note};
+use crate::send::{
+    fee_note, seal_known_owner, seal_note, seal_note_for_owner, shield_net_amount, zero_pad_note,
+};
 
 const TREE_DEPTH: usize = 30;
 const BATCH_SIZE: usize = 5;
@@ -949,7 +951,7 @@ impl CurvyClient {
         &self,
         spender: &Account,
         input_notes: &[OwnedNote],
-        allocations: &[(KnownOwner, u128)],
+        allocations: &[(crate::account::ScanRecipient, u128)],
         relayer: Option<(&Identity, u128)>,
         fee_recipient: Option<&Identity>,
         submitter_priv: &str,
@@ -989,11 +991,11 @@ impl CurvyClient {
                 bail!("PIX aggregation input is not owned by the funding account");
             }
         }
-        for (owner, amount) in allocations {
+        for (recipient, amount) in allocations {
             if *amount == 0 {
                 bail!("PIX allocation amounts must be non-zero");
             }
-            if owner.owner.as_tuple() == spender.bjj_pub {
+            if recipient.owner_pub == spender.bjj_pub {
                 bail!("PIX allocation owner must differ from the funding account");
             }
         }
@@ -1055,8 +1057,15 @@ impl CurvyClient {
 
         let allocation_notes = allocations
             .iter()
-            .map(|(owner, amount)| seal_known_owner(*owner, u128_fr(*amount), token))
-            .collect::<Vec<_>>();
+            .map(|(recipient, amount)| {
+                seal_note_for_owner(
+                    &recipient.viewer,
+                    recipient.owner_pub,
+                    u128_fr(*amount),
+                    token,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let change = seal_note(&spender.identity(), u128_fr(change_amount), token)?;
         // Stealth-sealed, so the operator's paymaster can discover it by scanning.
         let relayer_note = relayer
