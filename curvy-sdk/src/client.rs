@@ -36,6 +36,12 @@ const LEGACY_MAX_OUTPUTS: u64 = 3;
 const PIX_AGGREGATION_MAX_INPUTS: u64 = 2;
 const PIX_AGGREGATION_MAX_OUTPUTS: u64 = 9;
 const PIX_WITHDRAWAL_MAX_INPUTS: u64 = 10;
+/// ERC-20 transfers are not uniformly the ~65k operation of a minimal token.
+///
+/// In particular, wxHOPR performs additional accounting and exhausts the former
+/// 100k limit before the portal can be funded. A deliberately generous limit is
+/// safe here because unused gas is refunded; this is only the transaction cap.
+const ERC20_TRANSFER_GAS_LIMIT: u64 = 500_000;
 
 // Fee accessors.
 
@@ -276,6 +282,16 @@ impl CurvyClient {
         dec.parse().context("parse eth balance")
     }
 
+    /// An address's ERC-20 balance in the token's smallest unit.
+    pub async fn erc20_balance(&self, token: &str, owner: &str) -> Result<u128> {
+        let dec = self
+            .balances
+            .erc20_balance(&token.to_string(), &owner.to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        dec.parse().context("parse ERC-20 balance")
+    }
+
     fn submitter(&self, route: Route) -> &Arc<dyn TxSubmitter> {
         match route {
             Route::Blokli => &self.blokli,
@@ -462,12 +478,12 @@ impl CurvyClient {
     pub async fn fund_prepared_deposit(
         &self,
         prepared: &PreparedDeposit,
-        operator_priv: &str,
+        funder_priv: &str,
         route: Route,
     ) -> Result<TxLedger> {
         let funding = self
             .submit_call(
-                operator_priv,
+                funder_priv,
                 &prepared.portal_address,
                 vec![],
                 &prepared.gross.to_string(),
@@ -486,6 +502,48 @@ impl CurvyClient {
                 for _ in 0..20 {
                     if self
                         .eth_balance(&prepared.portal_address)
+                        .await
+                        .is_ok_and(|balance| balance >= prepared.gross)
+                    {
+                        return Ok(recovered);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Fund a persisted shield portal with an ERC-20 transfer.
+    pub async fn fund_prepared_deposit_erc20(
+        &self,
+        prepared: &PreparedDeposit,
+        token_address: &str,
+        funder_priv: &str,
+        route: Route,
+    ) -> Result<TxLedger> {
+        let calldata = curvy_abi::encode_erc20_transfer(&prepared.portal_address, prepared.gross)?;
+        let funding = self
+            .submit_call(
+                funder_priv,
+                token_address,
+                calldata,
+                "0",
+                ERC20_TRANSFER_GAS_LIMIT,
+                route,
+                "shield:fund-portal-erc20",
+            )
+            .await;
+        match funding {
+            Ok((_outcome, ledger)) => Ok(ledger),
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                for _ in 0..20 {
+                    if self
+                        .erc20_balance(token_address, &prepared.portal_address)
                         .await
                         .is_ok_and(|balance| balance >= prepared.gross)
                     {

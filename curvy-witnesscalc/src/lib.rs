@@ -6,10 +6,68 @@ use anyhow::{Context, Result, bail};
 use ark_bn254::Fr;
 use curvy_witness::WitnessGraph;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 pub mod pending;
 pub mod pix;
+
+/// Optional newline-delimited JSON destination for proof timing records.
+///
+/// This is deliberately separate from `tracing`: acceptance tests run proofs on blocking
+/// worker threads and must retain measurements even when a subscriber filter changes or the
+/// process is terminated immediately after the protocol completes.
+pub const PROOF_TIMINGS_PATH_ENV: &str = "CURVY_PROOF_TIMINGS_PATH";
+
+static PROOF_TIMING_WRITER: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(serde::Serialize)]
+struct ProofTimingRecord<'a> {
+    schema_version: u8,
+    unix_time_ms: u128,
+    circuit: &'a str,
+    graph_load_ms: u64,
+    prover_load_ms: u64,
+    witness_ms: u64,
+    groth16_ms: u64,
+    total_ms: u64,
+}
+
+fn append_proof_timing(path: &Path, record: &ProofTimingRecord<'_>) -> Result<()> {
+    let _guard = PROOF_TIMING_WRITER
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Curvy proof timing writer lock was poisoned"))?;
+    let mut output = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open Curvy proof timing sink {}", path.display()))?;
+    serde_json::to_writer(&mut output, record).context("encode Curvy proof timing record")?;
+    output
+        .write_all(b"\n")
+        .context("terminate Curvy proof timing record")?;
+    output.flush().context("flush Curvy proof timing record")?;
+    Ok(())
+}
+
+fn record_proof_timing(record: &ProofTimingRecord<'_>) {
+    let Some(path) = std::env::var_os(PROOF_TIMINGS_PATH_ENV) else {
+        return;
+    };
+    if let Err(error) = append_proof_timing(Path::new(&path), record) {
+        tracing::warn!(
+            path = %Path::new(&path).display(),
+            %error,
+            "failed to persist Curvy proof timing"
+        );
+    }
+}
 
 /// Produces a BN254 witness assignment from circuit input JSON.
 pub trait WitnessCalculator {
@@ -241,10 +299,50 @@ impl Circuit {
 
     /// Generate and verify a Groth16 proof.
     pub fn prove(&self, input_json: &str) -> Result<ProofBundle> {
+        let total_started = Instant::now();
+
+        let phase_started = Instant::now();
         let calc = self.load_calculator()?;
+        let graph_load_ms = phase_started.elapsed().as_millis() as u64;
+
+        let phase_started = Instant::now();
         let prover = self.load_prover()?;
+        let prover_load_ms = phase_started.elapsed().as_millis() as u64;
+
+        let phase_started = Instant::now();
         let assignment = calc.calculate(input_json)?;
-        prover.prove_assignment(&assignment)
+        let witness_ms = phase_started.elapsed().as_millis() as u64;
+
+        let phase_started = Instant::now();
+        let bundle = prover.prove_assignment(&assignment)?;
+        let groth16_ms = phase_started.elapsed().as_millis() as u64;
+        let total_ms = total_started.elapsed().as_millis() as u64;
+
+        let timing = ProofTimingRecord {
+            schema_version: 1,
+            unix_time_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            circuit: self.key,
+            graph_load_ms,
+            prover_load_ms,
+            witness_ms,
+            groth16_ms,
+            total_ms,
+        };
+
+        tracing::info!(
+            circuit = self.key,
+            graph_load_ms,
+            prover_load_ms,
+            witness_ms,
+            groth16_ms,
+            total_ms,
+            "Curvy proof timing"
+        );
+        record_proof_timing(&timing);
+        Ok(bundle)
     }
 }
 

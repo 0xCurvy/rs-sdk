@@ -9,6 +9,15 @@ use curvy_types::{
 
 /// Generated contract bindings grouped by contract.
 pub mod bindings {
+    pub mod erc20 {
+        alloy::sol! {
+            #[sol(rpc)]
+            interface IERC20 {
+                function transfer(address to, uint256 amount) external returns (bool);
+                function balanceOf(address owner) external view returns (uint256);
+            }
+        }
+    }
     pub mod aggregator {
         alloy::sol! {
             #[sol(rpc)]
@@ -90,6 +99,16 @@ fn proof_to_u256(p: &Groth16Proof) -> Result<SolidityProof> {
 }
 
 // Calldata encoders.
+
+/// `IERC20.transfer(to, amount)` calldata.
+pub fn encode_erc20_transfer(to: &str, amount: u128) -> Result<Vec<u8>> {
+    let to: Address = to.parse().context("parse ERC-20 transfer recipient")?;
+    Ok(bindings::erc20::IERC20::transferCall {
+        to,
+        amount: U256::from(amount),
+    }
+    .abi_encode())
+}
 
 /// `PortalFactory.deployShieldPortal(note, recovery)` calldata.
 pub fn encode_deploy_shield_portal(note: &OnchainNote, recovery: &str) -> Result<Vec<u8>> {

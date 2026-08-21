@@ -19,6 +19,7 @@ sha2 = "0.10"
 hex = { workspace = true }
 anyhow = { workspace = true }
 num-bigint = { workspace = true }
+tracing = { workspace = true }
 
 # Independent graph evaluator and optional encoding checks.
 [dev-dependencies]

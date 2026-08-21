@@ -86,6 +86,20 @@ query ($address: String!) {
   }
 }"#;
 
+const HOPR_BALANCE_QUERY: &str = r#"
+query ($address: String!) {
+  hoprBalance(address: $address, token: HOPR) {
+    __typename
+    ... on HoprBalance { address balance }
+    ... on InvalidAddressError { code message }
+    ... on QueryFailedError { code message }
+  }
+  chainInfo {
+    __typename
+    ... on ChainInfo { contractAddresses }
+  }
+}"#;
+
 const TRANSACTION_COUNT_QUERY: &str = r#"
 query ($address: String!) {
   transactionCount(address: $address) {
@@ -282,6 +296,31 @@ impl BalanceReader for BlokliChain {
             )
             .await?;
         let node = union_node(&response, "nativeBalance")?;
+        token_value_to_wei(&string_field(node, "balance")?)
+    }
+
+    async fn erc20_balance(&self, token: &Addr, owner: &Addr) -> Result<Dec> {
+        let response = self
+            .gql(HOPR_BALANCE_QUERY, serde_json::json!({ "address": owner }))
+            .await?;
+        let chain_info = &response["data"]["chainInfo"];
+        let encoded = chain_info["contractAddresses"].as_str().ok_or_else(|| {
+            ChainError::Decode(format!("chainInfo has no contractAddresses: {chain_info}"))
+        })?;
+        let addresses: serde_json::Map<String, serde_json::Value> = serde_json::from_str(encoded)
+            .map_err(|error| {
+            ChainError::Decode(format!("invalid chainInfo contractAddresses: {error}"))
+        })?;
+        let configured = addresses
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ChainError::Decode("chainInfo has no HOPR token address".to_string()))?;
+        if !configured.eq_ignore_ascii_case(token) {
+            return Err(ChainError::Unsupported(format!(
+                "Blokli can only read its configured HOPR token {configured}, not {token}"
+            )));
+        }
+        let node = union_node(&response, "hoprBalance")?;
         token_value_to_wei(&string_field(node, "balance")?)
     }
 

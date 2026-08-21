@@ -110,6 +110,16 @@ pub trait PortalDirectory: Send + Sync {
 #[async_trait]
 pub trait BalanceReader: Send + Sync {
     async fn eth_balance(&self, addr: &Addr) -> Result<Dec>;
+    /// ERC-20 balance for `owner` at `token`.
+    ///
+    /// Backends that only expose the chain's configured HOPR token may reject
+    /// any other token address.
+    async fn erc20_balance(&self, token: &Addr, owner: &Addr) -> Result<Dec> {
+        let _ = (token, owner);
+        Err(ChainError::Unsupported(
+            "ERC-20 balance reads are not supported by this backend".to_string(),
+        ))
+    }
     async fn vault_balance(&self, owner: &Addr, token_id: &Dec) -> Result<Dec>;
     async fn tx_count(&self, addr: &Addr) -> Result<u64>;
     async fn gas_price(&self) -> Result<u128>;
