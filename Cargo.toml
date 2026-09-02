@@ -12,17 +12,29 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-rc.6"
 edition = "2024"
 license = "MIT"
-publish = false
+repository = "https://github.com/0xCurvy/rs-sdk"
 rust-version = "1.94"
 
 [workspace.dependencies]
-# Exact versions keep artifact evaluation reproducible.
-curvy-core = "=0.1.0-rc.3"
-curvy-prover = "=0.1.0-rc.3"
-curvy-witness = "=0.1.0-rc.3"
+# The workspace's own crates, versioned so they can be published. Published in this
+# order: types, chain-api, abi, witnesscalc, chain-blokli, sdk.
+curvy-types = { path = "curvy-types", version = "=0.1.0-rc.6" }
+curvy-chain-api = { path = "curvy-chain-api", version = "=0.1.0-rc.6" }
+curvy-abi = { path = "curvy-abi", version = "=0.1.0-rc.6" }
+curvy-witnesscalc = { path = "curvy-witnesscalc", version = "=0.1.0-rc.6" }
+curvy-chain-blokli = { path = "curvy-chain-blokli", version = "=0.1.0-rc.6" }
+curvy-chain-rpc = { path = "curvy-chain-rpc", version = "=0.1.0-rc.6" }
+curvy-sdk = { path = "curvy-sdk", version = "=0.1.0-rc.6" }
+
+# Exact versions keep artifact evaluation reproducible: the graph and zkey digests
+# pinned in curvy-witnesscalc are only known to hold for these releases. `parallel` is
+# opt-in since rc.6 (rc.3 had it on by default); without it proving is single-threaded.
+curvy-core = "=0.1.0-rc.6"
+curvy-prover = { version = "=0.1.0-rc.6", features = ["parallel"] }
+curvy-witness = "=0.1.0-rc.6"
 
 # Field values cross the crate boundary.
 ark-bn254 = { version = "=0.6.0", features = ["std"] }

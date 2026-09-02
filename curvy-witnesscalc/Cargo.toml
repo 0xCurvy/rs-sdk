@@ -3,9 +3,17 @@ name = "curvy-witnesscalc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+rust-version.workspace = true
+description = "Witness generation and Groth16 proving for the Curvy circuits"
 
 # Witness generation and Groth16 proving.
+
+[features]
+# Fall back to the graphs checked into this repository (`artifacts/signet`) when no
+# artifacts directory is configured. For the repository's own tests and acceptance flow;
+# never for consumers, whose binaries do not carry the source tree.
+bundled-graphs = []
 
 [dependencies]
 curvy-core = { workspace = true }
@@ -23,5 +31,6 @@ tracing = { workspace = true }
 
 # Independent graph evaluator and optional encoding checks.
 [dev-dependencies]
+curvy-witnesscalc = { path = ".", features = ["bundled-graphs"] }
 circom-witnesscalc = "0.3.0"
 curvy-witness = { workspace = true, features = ["sage", "signet"] }

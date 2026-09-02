@@ -3,14 +3,16 @@ name = "curvy-chain-rpc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 # Direct-RPC adapters and transaction submission.
 
 [dependencies]
-curvy-chain-api = { path = "../curvy-chain-api" }
-curvy-types = { path = "../curvy-types" }
-curvy-abi = { path = "../curvy-abi" }
+curvy-chain-api = { workspace = true }
+curvy-types = { workspace = true }
+curvy-abi = { workspace = true }
 alloy = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }

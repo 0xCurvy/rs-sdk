@@ -957,7 +957,8 @@ impl CurvyClient {
             u128_fr(protocol_fee_per_thousand),
             u128_fr(gas_fee),
             fee_pub,
-        );
+        )
+        .context("aggregation witness")?;
         let input_json = serde_json::to_string(&w)?;
         let bundle = tokio::task::spawn_blocking(move || {
             curvy_witnesscalc::Circuit::aggregation().prove(&input_json)
@@ -1164,7 +1165,7 @@ impl CurvyClient {
             token,
             &seed,
         )?;
-        let signer = SeedNoteSigner::new(&spender.k);
+        let signer = SeedNoteSigner::new(&spender.k).context("spender key")?;
         let core_outputs = regular_outputs
             .iter()
             .map(OwnedNote::to_core)
@@ -1310,7 +1311,8 @@ impl CurvyClient {
             notes_root,
             destination_fr,
             token,
-        );
+        )
+        .context("withdrawal witness")?;
         let input_json = serde_json::to_string(&w)?;
         let bundle = tokio::task::spawn_blocking(move || {
             curvy_witnesscalc::Circuit::withdrawal().prove(&input_json)

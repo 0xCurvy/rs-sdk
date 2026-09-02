@@ -383,7 +383,7 @@ mod tests {
         assert_eq!(discovered.amount, Fr::from(77_u64));
         assert_ne!(
             discovered.owner_pub,
-            curvy_core::eddsa::pub_from_private_key_hex(&k),
+            curvy_core::eddsa::pub_from_private_key_hex(&k)?,
             "the viewer must not become the note owner",
         );
         Ok(())

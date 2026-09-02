@@ -117,7 +117,7 @@ impl Account {
     pub fn from_meta_keys(k: &str, v: &str) -> Result<Self> {
         let (big_k, big_v) =
             stealth::get_meta(k, v).map_err(|e| anyhow::anyhow!("get_meta: {e}"))?;
-        let bjj_pub = pub_from_private_key_hex(k);
+        let bjj_pub = pub_from_private_key_hex(k).context("spend key")?;
         Ok(Self {
             k: k.to_string(),
             v: v.to_string(),

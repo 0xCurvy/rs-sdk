@@ -11,7 +11,7 @@ curvy-e2e - acceptance flow against a local Blokli stack
 Environment:
   BLOKLI_URL          default http://127.0.0.1:8080
   CURVY_ADDRESSES     Blokli's curvy_deployed_addresses.json
-  CURVY_ZK_KEYS_DIR   the zk-keys/v2 tree
+  CURVY_ZK_KEYS_DIR   directory with the proving keys (and graphs), flat
   CURVY_E2E_SALT      u64, to replay a specific run against a fresh chain
 
 `--preflight` validates dependencies without submitting transactions.";

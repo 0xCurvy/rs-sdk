@@ -40,9 +40,9 @@ export CURVY_ADDRESSES=/absolute/path/to/curvy_deployed_addresses.json
 just e2e
 ```
 
-Proving keys are resolved inside the repo at `zk-keys/v2` and fetched on demand, so
-there is no key path to configure. Driving cargo directly still works, and then
-`CURVY_ZK_KEYS_DIR` is yours to set.
+Proving keys are fetched on demand into `zk-keys/v2` inside the repo, and `just` points
+`CURVY_ZK_KEYS_DIR` there, so there is no path to configure. Driving cargo directly still
+works, and then `CURVY_ZK_KEYS_DIR` is yours to set.
 
 The stack must deploy verifier profiles `(2,9)` and `(10)`. Nine phases exercise
 deposit, two aggregation fan-outs, a ten-owner withdrawal, commitment, and indexed
@@ -150,14 +150,22 @@ Both reconcile against the aggregator's on-chain root before anything is spent.
 
 ## Artifacts
 
-Witness graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`,
-and two compatibility profiles live under `artifacts/signet` and are
-authenticated against pinned SHA-256 digests before decompression or decoding.
-Proving keys are resolved flat under `CURVY_ZK_KEYS_DIR` and hash-checked before the
-unchecked point parser sees them. Wrong or stale files fail closed.
+Every circuit needs a witness graph and a proving key at runtime. Both are resolved the
+same way: a circuit-specific variable (`CURVY_<CIRCUIT>_GRAPH`, `CURVY_<CIRCUIT>_ZKEY`)
+wins, otherwise the file is looked up flat under `CURVY_ZK_KEYS_DIR`. Both are
+authenticated against SHA-256 digests pinned in `curvy-witnesscalc` before decompression,
+decoding, or the unchecked point parser sees them. Wrong or stale files fail closed.
 
-They are `SIGNET01` version-1 bodies inside zstd frames, 9.5 MB bundled. A stock
-`curvy-witness` 0.1.0-rc.3 reads them with no feature flags.
+The artifacts are **not** part of the published crates. They ship with this repository's
+GitHub releases; a consumer downloads the release's graphs and keys into one directory
+and points `CURVY_ZK_KEYS_DIR` at it. `scripts/fetch-keys.sh` does exactly that for this
+checkout, and copies the graphs from `artifacts/signet` alongside.
+
+The graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`, and two
+compatibility profiles are checked in under `artifacts/signet`: `SIGNET01` version-1
+bodies inside zstd frames, 9.5 MB in total, readable by a stock `curvy-witness` with no
+feature flags. The `bundled-graphs` feature of `curvy-witnesscalc` falls back to that
+directory and exists for this repository's own tests and acceptance flow only.
 
 See [artifacts/README.md](artifacts/README.md) for digests and test fixtures.
 

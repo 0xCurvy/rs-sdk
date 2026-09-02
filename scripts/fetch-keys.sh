@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Fetch and authenticate evaluation proving keys.
+# Fetch and authenticate evaluation proving keys, and place the witness graphs from
+# artifacts/signet next to them, so zk-keys/v2 has the flat layout consumers point
+# CURVY_ZK_KEYS_DIR at.
 #
 # Sources, in priority order:
 #   1. $CURVY_KEYS_URL   a base URL serving the files at their relative paths
@@ -43,7 +45,8 @@ done <<< "$pins"
 
 if [ "$missing" -eq 0 ]; then
   echo "proving keys: all pins verified at zk-keys/v2"
-  exit 0
+  fetched=0
+  failures=0
 fi
 
 # Resolve a source for missing keys.
@@ -64,11 +67,12 @@ MSG
   exit 1
 fi
 
+mkdir -p "$KEYS_DIR"
+if [ "$missing" -ne 0 ]; then
 echo "proving keys: fetching $missing of 5 into zk-keys/v2"
 failures=0
 fetched=0
 
-mkdir -p "$KEYS_DIR"
 while IFS=$'\t' read -r name expected; do
   target="$KEYS_DIR/$name"
   if [ -f "$target" ] && [ "$(digest "$target")" = "$expected" ]; then
@@ -112,3 +116,22 @@ if [ "$failures" -ne 0 ]; then
 fi
 
 echo "proving keys: $fetched fetched, all pins verified at zk-keys/v2"
+fi
+
+# Witness graphs: copied from the checkout, digest-checked like the keys.
+graph_pins="$(sed -n 's/.*graph_file: "\([^"]*\)".*/\1/p;s/.*graph_sha256: "\([^"]*\)".*/\1/p' \
+  curvy-witnesscalc/src/lib.rs | paste - -)"
+while IFS=$'\t' read -r name expected; do
+  target="$KEYS_DIR/$name"
+  if [ -f "$target" ] && [ "$(digest "$target")" = "$expected" ]; then
+    continue
+  fi
+  cp "artifacts/signet/$name" "$target"
+  if [ "$(digest "$target")" != "$expected" ]; then
+    printf '  %-58s SHA-256 MISMATCH (stale checkout?)\n' "$name"
+    rm -f "$target"
+    exit 1
+  fi
+  printf '  %-58s ok (%s bytes)\n' "$name" "$(wc -c < "$target" | tr -d ' ')"
+done <<< "$graph_pins"
+echo "witness graphs: all pins verified at zk-keys/v2"

@@ -307,7 +307,7 @@ pub async fn preflight() -> Result<Preflight> {
             .with_context(|| format!("{} artifacts are not usable", circuit.label))?;
         artifacts.push((
             circuit.label.to_owned(),
-            circuit.graph_path(),
+            circuit.graph_path()?,
             circuit.zkey_path()?,
         ));
     }
