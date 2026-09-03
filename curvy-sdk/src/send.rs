@@ -7,10 +7,35 @@ use curvy_core::{eddsa, stealth};
 use num_bigint::BigUint;
 use sha3::{Digest, Keccak256};
 
-use crate::account::{Identity, OwnedNote, parse_xy, shared_secret_from_spending_pub_key};
+use crate::account::{
+    Identity, OwnedNote, ViewerIdentity, parse_xy, shared_secret_from_spending_pub_key,
+};
 
 /// Seal an output note to a stealth recipient.
 pub fn seal_note(recipient: &Identity, amount: Fr, token: Fr) -> Result<OwnedNote> {
+    seal_note_for_owner(
+        &ViewerIdentity {
+            big_k: recipient.big_k.clone(),
+            big_v: recipient.big_v.clone(),
+        },
+        recipient.bjj_pub,
+        amount,
+        token,
+    )
+}
+
+/// Seals a note using `recipient` only for private discovery while assigning
+/// spending authority to the independent BabyJubJub `owner_pub`.
+///
+/// This is the PIX boundary: the Curvy viewer may discover the note before the
+/// SSA finishes, but only the separately reconstructed SSA key matching
+/// `owner_pub` can sign its withdrawal.
+pub fn seal_note_for_owner(
+    recipient: &ViewerIdentity,
+    owner_pub: (Fr, Fr),
+    amount: Fr,
+    token: Fr,
+) -> Result<OwnedNote> {
     let (_r, out) = stealth::send(&recipient.big_k, &recipient.big_v)
         .map_err(|e| anyhow::anyhow!("stealth send: {e}"))?;
     let shared_secret = shared_secret_from_spending_pub_key(&out.spending_pub_key)
@@ -18,7 +43,7 @@ pub fn seal_note(recipient: &Identity, amount: Fr, token: Fr) -> Result<OwnedNot
     let ephemeral_key = parse_xy(&out.big_r)?;
     let view_tag = u16::from_str_radix(&out.view_tag, 16).context("parse stealth view tag")?;
     Ok(OwnedNote {
-        owner_pub: recipient.bjj_pub,
+        owner_pub,
         shared_secret,
         ephemeral_key,
         view_tag,
@@ -165,5 +190,18 @@ mod tests {
     fn shield_fee_addition_overflow_is_reported() {
         let error = shield_net_amount(u128::MAX, 0, u128::MAX, 1).unwrap_err();
         assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn viewer_identity_does_not_choose_the_note_owner() -> Result<()> {
+        let (_k, _v, big_k, big_v) = stealth::new_meta()
+            .map_err(|error| anyhow::anyhow!("generate viewer fixture: {error}"))?;
+        let viewer = ViewerIdentity::new(big_k, big_v)?;
+        let owner = (Fr::from(41_u64), Fr::from(42_u64));
+
+        let note = seal_note_for_owner(&viewer, owner, Fr::from(5_u64), Fr::from(1_u64))?;
+
+        assert_eq!(note.owner_pub, owner);
+        Ok(())
     }
 }

@@ -3,7 +3,9 @@ name = "curvy-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+rust-version.workspace = true
+description = "Backend-neutral domain types for the Curvy shielded pool SDK"
 
 # Backend-neutral domain types.
 

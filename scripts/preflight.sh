@@ -50,7 +50,7 @@ else
   digest() { echo "no-sha256-tool"; }
 fi
 
-pins="$(sed -n 's/.*graph_default: "\([^"]*\)".*/\1/p;s/.*graph_sha256: "\([^"]*\)".*/\1/p' \
+pins="$(sed -n 's/.*graph_file: "\([^"]*\)".*/\1/p;s/.*graph_sha256: "\([^"]*\)".*/\1/p' \
   curvy-witnesscalc/src/lib.rs | paste - -)"
 if [ -z "$pins" ]; then
   bad artifacts "could not read the pin table out of curvy-witnesscalc/src/lib.rs"

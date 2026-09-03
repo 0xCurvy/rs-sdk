@@ -4,13 +4,16 @@
 
 pub mod account;
 pub mod client;
+pub mod scan;
 pub mod send;
 
-pub use account::{Account, Identity, OwnedNote};
+pub use account::{Account, Identity, OwnedNote, ScanRecipient, Viewer, ViewerIdentity};
 pub use client::{
-    AmbiguousPixAggregation, AmbiguousSubmission, CurvyClient, Discovered, PixAggregationResult,
+    AmbiguousPixAggregation, AmbiguousSubmission, CurvyClient, PixAggregationResult,
     PreparedDeposit, Route, TxLedger, ambiguous_pix_aggregation, ambiguous_submission,
 };
+pub use curvy_types::{PendingNote, PendingNotesEvent};
+pub use scan::{Discovered, scan_pending_event, scan_pending_note, scan_pending_note_with_viewer};
 
 /// Re-export the shared field and cryptography types.
 pub use curvy_core;

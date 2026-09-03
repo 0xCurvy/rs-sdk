@@ -3,16 +3,18 @@ name = "curvy-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+rust-version.workspace = true
+description = "Client orchestration for the Curvy shielded pool: notes, allocations, aggregation, withdrawal"
 
 # Client orchestration over chain and proving adapters.
 
 [dependencies]
 curvy-core = { workspace = true }
-curvy-witnesscalc = { path = "../curvy-witnesscalc" }
-curvy-chain-api = { path = "../curvy-chain-api" }
-curvy-abi = { path = "../curvy-abi" }
-curvy-types = { path = "../curvy-types" }
+curvy-witnesscalc = { workspace = true }
+curvy-chain-api = { workspace = true }
+curvy-abi = { workspace = true }
+curvy-types = { workspace = true }
 ark-bn254 = { workspace = true }
 ark-ff = { workspace = true }
 num-bigint = { workspace = true }

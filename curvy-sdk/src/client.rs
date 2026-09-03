@@ -5,12 +5,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
-use curvy_core::cipher::decrypt_amount_token;
 use curvy_core::eddsa::ScalarSigningKey;
 use curvy_core::field::{Fr, fr_from_biguint, fr_to_biguint, fr_to_dec};
 use curvy_core::imt::Imt;
-use curvy_core::note::{note_id, owner_hash};
-use curvy_core::stealth;
 use curvy_core::witness::{
     KnownOwner, NoteSigner, Proof, SeedNoteSigner, build_aggregation, build_pending_commitment,
     build_withdrawal_with_signer,
@@ -25,10 +22,12 @@ use curvy_chain_api::{
     TxSubmitter,
 };
 
-use crate::account::{
-    Account, Identity, OwnedNote, parse_fr_decimal, shared_secret_from_spending_pub_key,
+use crate::account::{Account, Identity, OwnedNote, parse_fr_decimal};
+pub use crate::scan::Discovered;
+use crate::scan::scan_pending_events;
+use crate::send::{
+    fee_note, seal_known_owner, seal_note, seal_note_for_owner, shield_net_amount, zero_pad_note,
 };
-use crate::send::{fee_note, seal_known_owner, seal_note, shield_net_amount, zero_pad_note};
 
 const TREE_DEPTH: usize = 30;
 const BATCH_SIZE: usize = 5;
@@ -37,6 +36,12 @@ const LEGACY_MAX_OUTPUTS: u64 = 3;
 const PIX_AGGREGATION_MAX_INPUTS: u64 = 2;
 const PIX_AGGREGATION_MAX_OUTPUTS: u64 = 9;
 const PIX_WITHDRAWAL_MAX_INPUTS: u64 = 10;
+/// ERC-20 transfers are not uniformly the ~65k operation of a minimal token.
+///
+/// In particular, wxHOPR performs additional accounting and exhausts the former
+/// 100k limit before the portal can be funded. A deliberately generous limit is
+/// safe here because unused gas is refunded; this is only the transaction cap.
+const ERC20_TRANSFER_GAS_LIMIT: u64 = 500_000;
 
 // Fee accessors.
 
@@ -87,16 +92,6 @@ pub enum Route {
     Blokli,
     /// direct `eth_sendRawTransaction` (the fallback / operator path).
     Direct,
-}
-
-/// A discovered note (post integrity-gate).
-#[derive(Clone, Debug)]
-pub struct Discovered {
-    pub note_id: Fr,
-    pub amount: Fr,
-    pub token: Fr,
-    pub shared_secret: Fr,
-    pub is_plaintext: bool,
 }
 
 /// A per-tx ledger entry.
@@ -287,6 +282,16 @@ impl CurvyClient {
         dec.parse().context("parse eth balance")
     }
 
+    /// An address's ERC-20 balance in the token's smallest unit.
+    pub async fn erc20_balance(&self, token: &str, owner: &str) -> Result<u128> {
+        let dec = self
+            .balances
+            .erc20_balance(&token.to_string(), &owner.to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        dec.parse().context("parse ERC-20 balance")
+    }
+
     fn submitter(&self, route: Route) -> &Arc<dyn TxSubmitter> {
         match route {
             Route::Blokli => &self.blokli,
@@ -473,12 +478,12 @@ impl CurvyClient {
     pub async fn fund_prepared_deposit(
         &self,
         prepared: &PreparedDeposit,
-        operator_priv: &str,
+        funder_priv: &str,
         route: Route,
     ) -> Result<TxLedger> {
         let funding = self
             .submit_call(
-                operator_priv,
+                funder_priv,
                 &prepared.portal_address,
                 vec![],
                 &prepared.gross.to_string(),
@@ -497,6 +502,48 @@ impl CurvyClient {
                 for _ in 0..20 {
                     if self
                         .eth_balance(&prepared.portal_address)
+                        .await
+                        .is_ok_and(|balance| balance >= prepared.gross)
+                    {
+                        return Ok(recovered);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Fund a persisted shield portal with an ERC-20 transfer.
+    pub async fn fund_prepared_deposit_erc20(
+        &self,
+        prepared: &PreparedDeposit,
+        token_address: &str,
+        funder_priv: &str,
+        route: Route,
+    ) -> Result<TxLedger> {
+        let calldata = curvy_abi::encode_erc20_transfer(&prepared.portal_address, prepared.gross)?;
+        let funding = self
+            .submit_call(
+                funder_priv,
+                token_address,
+                calldata,
+                "0",
+                ERC20_TRANSFER_GAS_LIMIT,
+                route,
+                "shield:fund-portal-erc20",
+            )
+            .await;
+        match funding {
+            Ok((_outcome, ledger)) => Ok(ledger),
+            Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                for _ in 0..20 {
+                    if self
+                        .erc20_balance(token_address, &prepared.portal_address)
                         .await
                         .is_ok_and(|balance| balance >= prepared.gross)
                     {
@@ -910,7 +957,8 @@ impl CurvyClient {
             u128_fr(protocol_fee_per_thousand),
             u128_fr(gas_fee),
             fee_pub,
-        );
+        )
+        .context("aggregation witness")?;
         let input_json = serde_json::to_string(&w)?;
         let bundle = tokio::task::spawn_blocking(move || {
             curvy_witnesscalc::Circuit::aggregation().prove(&input_json)
@@ -962,7 +1010,7 @@ impl CurvyClient {
         &self,
         spender: &Account,
         input_notes: &[OwnedNote],
-        allocations: &[(KnownOwner, u128)],
+        allocations: &[(crate::account::ScanRecipient, u128)],
         relayer: Option<(&Identity, u128)>,
         fee_recipient: Option<&Identity>,
         submitter_priv: &str,
@@ -1002,11 +1050,11 @@ impl CurvyClient {
                 bail!("PIX aggregation input is not owned by the funding account");
             }
         }
-        for (owner, amount) in allocations {
+        for (recipient, amount) in allocations {
             if *amount == 0 {
                 bail!("PIX allocation amounts must be non-zero");
             }
-            if owner.owner.as_tuple() == spender.bjj_pub {
+            if recipient.owner_pub == spender.bjj_pub {
                 bail!("PIX allocation owner must differ from the funding account");
             }
         }
@@ -1068,8 +1116,15 @@ impl CurvyClient {
 
         let allocation_notes = allocations
             .iter()
-            .map(|(owner, amount)| seal_known_owner(*owner, u128_fr(*amount), token))
-            .collect::<Vec<_>>();
+            .map(|(recipient, amount)| {
+                seal_note_for_owner(
+                    &recipient.viewer,
+                    recipient.owner_pub,
+                    u128_fr(*amount),
+                    token,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let change = seal_note(&spender.identity(), u128_fr(change_amount), token)?;
         // Stealth-sealed, so the operator's paymaster can discover it by scanning.
         let relayer_note = relayer
@@ -1110,7 +1165,7 @@ impl CurvyClient {
             token,
             &seed,
         )?;
-        let signer = SeedNoteSigner::new(&spender.k);
+        let signer = SeedNoteSigner::new(&spender.k).context("spender key")?;
         let core_outputs = regular_outputs
             .iter()
             .map(OwnedNote::to_core)
@@ -1256,7 +1311,8 @@ impl CurvyClient {
             notes_root,
             destination_fr,
             token,
-        );
+        )
+        .context("withdrawal witness")?;
         let input_json = serde_json::to_string(&w)?;
         let bundle = tokio::task::spawn_blocking(move || {
             curvy_witnesscalc::Circuit::withdrawal().prove(&input_json)
@@ -1536,91 +1592,15 @@ impl CurvyClient {
 
     // Note scanning.
 
-    /// Scan pending events for notes owned by `account`.
+    /// Fetch and scan all indexed pending events for notes owned by `account`.
+    ///
+    /// Call [`crate::scan_pending_note`] or [`crate::scan_pending_event`] instead
+    /// when the pending-note data has already been fetched. Those pure functions
+    /// do not require a client or any chain and transaction adapters.
     pub async fn scan(&self, account: &Account) -> Result<Vec<Discovered>> {
         let head = self.notes.head_block().await?;
         let events = self.notes.pending_notes(0, head).await?;
-
-        let mut rs = Vec::new();
-        let mut tags = Vec::new();
-        // (note_id, enc_amount, enc_token, is_plaintext, eph_x, eph_y)
-        let mut meta: Vec<(String, String, String, bool, String, String)> = Vec::new();
-        for ev in &events {
-            let len = ev.note_ids.len();
-            anyhow::ensure!(
-                ev.ephemeral_keys[0].len() == len
-                    && ev.ephemeral_keys[1].len() == len
-                    && ev.view_tags.len() == len
-                    && ev.amounts.len() == len
-                    && ev.tokens.len() == len
-                    && ev.is_plaintext.len() == len,
-                "PendingNotes event {} has inconsistent parallel-array lengths",
-                ev.tx_hash
-            );
-            anyhow::ensure!(
-                ev.view_tags.iter().all(|tag| u16::try_from(*tag).is_ok()),
-                "PendingNotes event {} has a view tag outside uint16",
-                ev.tx_hash
-            );
-            for i in 0..ev.note_ids.len() {
-                let ex = ev.ephemeral_keys[0][i].clone();
-                let ey = ev.ephemeral_keys[1][i].clone();
-                rs.push(format!("{ex}.{ey}"));
-                tags.push(format!("{:02x}", ev.view_tags[i]));
-                meta.push((
-                    ev.note_ids[i].clone(),
-                    ev.amounts[i].clone(),
-                    ev.tokens[i].clone(),
-                    ev.is_plaintext[i],
-                    ex,
-                    ey,
-                ));
-            }
-        }
-
-        let matches = stealth::scan(&account.k, &account.v, &rs, &tags)
-            .map_err(|e| anyhow::anyhow!("stealth scan: {e}"))?;
-
-        let mut out = Vec::new();
-        for m in matches {
-            let index: usize = m.index.try_into().context("stealth match index overflow")?;
-            let (note_id_dec, enc_amount, enc_token, is_plain, ex, ey) = meta
-                .get(index)
-                .with_context(|| format!("stealth match index {index} is out of bounds"))?;
-            let shared_secret = shared_secret_from_spending_pub_key(&m.spending_pub_key)
-                .context("parse scanned shared-secret point")?;
-
-            let (amount, token) = if *is_plain {
-                (
-                    parse_fr_decimal(enc_amount, "plaintext note amount")?,
-                    parse_fr_decimal(enc_token, "plaintext note token")?,
-                )
-            } else {
-                let ss = fr_to_biguint(&shared_secret);
-                let ebx = fr_to_biguint(&parse_fr_decimal(ex, "ephemeral key x")?);
-                let eby = fr_to_biguint(&parse_fr_decimal(ey, "ephemeral key y")?);
-                decrypt_amount_token(
-                    parse_fr_decimal(enc_amount, "encrypted note amount")?,
-                    parse_fr_decimal(enc_token, "encrypted note token")?,
-                    &ss,
-                    (&ebx, &eby),
-                )
-            };
-
-            // Verify the note id before returning a match.
-            let oh = owner_hash(account.bjj_pub, shared_secret);
-            let nid = note_id(oh, amount, token);
-            if nid == parse_fr_decimal(note_id_dec, "pending note id")? {
-                out.push(Discovered {
-                    note_id: nid,
-                    amount,
-                    token,
-                    shared_secret,
-                    is_plaintext: *is_plain,
-                });
-            }
-        }
-        Ok(out)
+        scan_pending_events(account, &events)
     }
 }
 

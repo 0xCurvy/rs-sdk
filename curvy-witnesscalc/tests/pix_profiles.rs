@@ -250,7 +250,9 @@ fn sage_reproduces_every_bundled_profile() {
         (Circuit::pending(), pending_input()),
     ] {
         let key = circuit.key;
-        let path = circuit.graph_path();
+        let path = circuit
+            .graph_path()
+            .unwrap_or_else(|e| panic!("{key}: graph path: {e:#}"));
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{key}: read graph: {e}"));
 
         let reference = circuit

@@ -2,12 +2,18 @@
 
 Witness graphs use the `SIGNET01` format and are evaluated by `curvy-witness`.
 
+At runtime `curvy-witnesscalc` resolves each graph like each proving key: the
+circuit's own variable (`CURVY_<CIRCUIT>_GRAPH`) wins, otherwise the file is read
+flat from `CURVY_ZK_KEYS_DIR`. The published crates do not carry these files; the
+GitHub releases do. Only the `bundled-graphs` feature, for this repository's tests
+and acceptance flow, falls back to `signet/` here.
+
 Each file is a zstd frame around a version-1 body, which a stock `curvy-witness`
 0.1.0-rc.3 accepts with no feature flags. The pinned digest is the digest of the file
 as it sits on disk, compressed: that is what the evaluator is handed and therefore
 what it authenticates.
 
-| profile | graph | graph SHA-256 | zkey in `CURVY_ZK_KEYS_DIR` (flat) | zkey SHA-256 |
+| profile | graph in `CURVY_ZK_KEYS_DIR` (flat) | graph SHA-256 | zkey in `CURVY_ZK_KEYS_DIR` (flat) | zkey SHA-256 |
 |---|---|---|---|---|
 | pending `(5,30)` | `signet/pending-5-30.signet.zst` | `69fa449825732a0958ccd0689ad361d9e8df1223231d8b71932d0efc4a07d8f0` | `verifyPendingNotesCommitment_5_30_0001.zkey` | `efb4c3d4d3350f931860faeb6319b6010303c5fbf06d8ef414d708e9cf907847` |
 | aggregation `(2,9,30,6)` | `signet/pix-aggregation-2-9-30.signet.zst` | `b974028ba40afdc067524819d61bdd9172a5e56369cfc05a75ba5d469c379c3a` | `verifyPixAggregation_2_9_30_evaluation.zkey` | `b4fced8a3c183d25a13a24c9ee7234ec96b77f87f688992ee07144f23ace6750` |

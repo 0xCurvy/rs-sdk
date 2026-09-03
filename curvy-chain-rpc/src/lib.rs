@@ -5,7 +5,8 @@ use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::rpc::types::Filter;
 use async_trait::async_trait;
 use curvy_abi::bindings::{
-    aggregator::CurvyAggregatorAlphaV2, portal_factory::PortalFactory, vault::CurvyVaultV2,
+    aggregator::CurvyAggregatorAlphaV2, erc20::IERC20, portal_factory::PortalFactory,
+    vault::CurvyVaultV2,
 };
 use curvy_chain_api::{
     BalanceReader, ChainError, FeeConfigSource, NoteIndexSource, PortalDirectory, Result,
@@ -227,6 +228,14 @@ impl BalanceReader for RpcChain {
         Ok(self
             .provider
             .get_balance(addr(a)?)
+            .await
+            .map_err(transport)?
+            .to_string())
+    }
+    async fn erc20_balance(&self, token: &Addr, owner: &Addr) -> Result<Dec> {
+        Ok(IERC20::new(addr(token)?, self.provider.clone())
+            .balanceOf(addr(owner)?)
+            .call()
             .await
             .map_err(transport)?
             .to_string())

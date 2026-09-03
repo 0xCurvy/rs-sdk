@@ -47,6 +47,84 @@ pub struct PendingNotesEvent {
     pub tx_hash: String,
 }
 
+/// One note item normalized out of a [`PendingNotesEvent`].
+///
+/// Contracts emit pending notes as parallel arrays. This scalar representation is
+/// the safer boundary for code that wants to inspect one note without querying an
+/// indexer or constructing a transaction-capable client.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingNote {
+    pub note_id: Dec,
+    pub ephemeral_key: [Dec; 2],
+    pub view_tag: u64,
+    pub token: Dec,
+    pub amount: Dec,
+    pub is_plaintext: bool,
+}
+
+/// A pending-note event whose parallel arrays do not describe the same number of
+/// notes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidPendingNotesEvent {
+    pub tx_hash: String,
+    pub field: &'static str,
+    pub expected: usize,
+    pub actual: usize,
+}
+
+impl std::fmt::Display for InvalidPendingNotesEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PendingNotes event {} has {} {} values, expected {}",
+            self.tx_hash, self.actual, self.field, self.expected
+        )
+    }
+}
+
+impl std::error::Error for InvalidPendingNotesEvent {}
+
+impl PendingNotesEvent {
+    /// Converts the event's parallel arrays into scalar note records.
+    ///
+    /// The conversion fails instead of truncating when any array has a different
+    /// length. This is an integrity boundary for data decoded from an indexer.
+    pub fn notes(&self) -> Result<Vec<PendingNote>, InvalidPendingNotesEvent> {
+        let expected = self.note_ids.len();
+        for (field, actual) in [
+            ("ephemeral-key x", self.ephemeral_keys[0].len()),
+            ("ephemeral-key y", self.ephemeral_keys[1].len()),
+            ("view-tag", self.view_tags.len()),
+            ("token", self.tokens.len()),
+            ("amount", self.amounts.len()),
+            ("plaintext flag", self.is_plaintext.len()),
+        ] {
+            if actual != expected {
+                return Err(InvalidPendingNotesEvent {
+                    tx_hash: self.tx_hash.clone(),
+                    field,
+                    expected,
+                    actual,
+                });
+            }
+        }
+
+        Ok((0..expected)
+            .map(|index| PendingNote {
+                note_id: self.note_ids[index].clone(),
+                ephemeral_key: [
+                    self.ephemeral_keys[0][index].clone(),
+                    self.ephemeral_keys[1][index].clone(),
+                ],
+                view_tag: self.view_tags[index],
+                token: self.tokens[index].clone(),
+                amount: self.amounts[index].clone(),
+                is_plaintext: self.is_plaintext[index],
+            })
+            .collect())
+    }
+}
+
 /// A checkpoint-pinned snapshot of the committed notes tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotesTreeSnapshot {
@@ -140,4 +218,65 @@ pub struct AggregatorState {
     pub current_note_index: u64,
     pub current_notes_batch_index: u64,
     pub current_nullifiers_batch_index: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_event_normalizes_parallel_arrays() {
+        let event = PendingNotesEvent {
+            note_ids: vec!["1".into(), "2".into()],
+            ephemeral_keys: [vec!["3".into(), "4".into()], vec!["5".into(), "6".into()]],
+            view_tags: vec![7, 8],
+            tokens: vec!["9".into(), "10".into()],
+            amounts: vec!["11".into(), "12".into()],
+            is_plaintext: vec![false, true],
+            block_number: 13,
+            tx_hash: "0xabc".into(),
+        };
+
+        assert_eq!(
+            event.notes().expect("valid event"),
+            vec![
+                PendingNote {
+                    note_id: "1".into(),
+                    ephemeral_key: ["3".into(), "5".into()],
+                    view_tag: 7,
+                    token: "9".into(),
+                    amount: "11".into(),
+                    is_plaintext: false,
+                },
+                PendingNote {
+                    note_id: "2".into(),
+                    ephemeral_key: ["4".into(), "6".into()],
+                    view_tag: 8,
+                    token: "10".into(),
+                    amount: "12".into(),
+                    is_plaintext: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_event_rejects_mismatched_parallel_arrays() {
+        let event = PendingNotesEvent {
+            note_ids: vec!["1".into()],
+            ephemeral_keys: [vec!["2".into()], Vec::new()],
+            view_tags: vec![3],
+            tokens: vec!["4".into()],
+            amounts: vec!["5".into()],
+            is_plaintext: vec![false],
+            tx_hash: "0xdef".into(),
+            ..Default::default()
+        };
+
+        let error = event.notes().expect_err("invalid event must fail");
+        assert_eq!(error.field, "ephemeral-key y");
+        assert_eq!(error.expected, 1);
+        assert_eq!(error.actual, 0);
+        assert!(error.to_string().contains("0xdef"));
+    }
 }

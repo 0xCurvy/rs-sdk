@@ -9,17 +9,19 @@ It covers four operations end to end:
 3. **aggregate** up to two input notes into nine regular outputs plus one fee output;
 4. **withdraw** up to ten notes held by unrelated BabyJubJub scalars in a single proof.
 
-There are two entry points. [`CurvyClient`](curvy-sdk/src/client.rs) is the direct
-API. [`CurvyDepositPool`](curvy-deposit-pool/src/pool.rs) implements
-`hopr_api::chain::DepositPool`, so a HOPR node can substitute it for
-`NonAnonymousDepositPool` at the construction site and change nothing else.
+[`CurvyClient`](curvy-sdk/src/client.rs) is the direct API. The HOPR
+`DepositPool` implementation lives in
+[`hopr-impls`](https://github.com/hoprnet/hopr-impls), and
+[`hopr-strategy`](https://github.com/hoprnet/hopr-strategy) injects it into its
+generic strategy. This SDK stays independent of HOPR's protocol lifecycle and
+allocation identifiers.
 
 ## Prerequisites
 
 | what | where | why |
 |---|---|---|
 | Rust 1.94 | `rust-toolchain.toml` | pinned; rustup installs it on first build |
-| A C compiler | `cc` on PATH | one dependency needs it, `secp256k1-sys` via `hopr-types` |
+| A C compiler | `cc` on PATH | native cryptography dependencies need it |
 | Proving keys | `zk-keys/v2` in this repo | 249 MB, gitignored; fetched and digest-checked automatically by any recipe that needs them |
 | A Curvy-enabled Blokli + Anvil stack | `BLOKLI_URL` | the only backend this SDK talks to |
 
@@ -38,13 +40,13 @@ export CURVY_ADDRESSES=/absolute/path/to/curvy_deployed_addresses.json
 just e2e
 ```
 
-Proving keys are resolved inside the repo at `zk-keys/v2` and fetched on demand, so
-there is no key path to configure. Driving cargo directly still works, and then
-`CURVY_ZK_KEYS_DIR` is yours to set.
+Proving keys are fetched on demand into `zk-keys/v2` inside the repo, and `just` points
+`CURVY_ZK_KEYS_DIR` there, so there is no path to configure. Driving cargo directly still
+works, and then `CURVY_ZK_KEYS_DIR` is yours to set.
 
-The stack must deploy verifier profiles `(2,9)` and `(10)`. Thirteen phases run:
-deposit, two aggregation fan-outs, a ten-owner withdrawal, then the four
-`DepositPool` methods. Each prints as it completes, and the summary lists every
+The stack must deploy verifier profiles `(2,9)` and `(10)`. Nine phases exercise
+deposit, two aggregation fan-outs, a ten-owner withdrawal, commitment, and indexed
+nullifier verification. Each prints as it completes, and the summary lists every
 transaction with its label, backend and hash.
 
 See [TESTING.md](TESTING.md) for stack requirements and validation commands.
@@ -61,7 +63,6 @@ Without it each run generates a unique note salt.
 | crate | responsibility |
 |---|---|
 | `curvy-sdk` | deposit, pending-note commit, aggregation, withdrawal, note sync |
-| `curvy-deposit-pool` | `hopr_api::chain::DepositPool` over `CurvyClient`, with batching and persistence |
 | `curvy-witnesscalc` | circuit input assembly, artifact selection, witness calculation, Groth16 proving |
 | `curvy-chain-blokli` | Blokli GraphQL index and `sendTransactionSync` submission |
 | `curvy-chain-rpc` | direct on-chain reads and plain-transfer fallback; not on the acceptance path |
@@ -72,27 +73,27 @@ Without it each run generates a unique note salt.
 Cryptographic primitives and proving are provided by the `curvy-*` crates. This
 workspace assembles circuit inputs and coordinates chain operations.
 
-## Things that will bite you
+## Scanning an already-indexed note
 
-**`deposit_funds_to` returns on enqueue, not on settlement.** Curvy's aggregation
-circuit takes 2 inputs and 9 regular outputs, so one proof serves seven recipients
-plus change plus a relayer note. Use `notify_deposit` to await settlement.
+Code that already has a pending note does not need to construct a `CurvyClient`
+or provide chain and transaction adapters. Normalize the indexer result to a
+`PendingNote`, then use the pure scanner:
 
-**Partial withdrawal delivers whole notes.** Curvy notes are atomic; splitting one
-needs an extra aggregation proof authorised by the depositor's key. Ask for an
-amount no subset matches exactly and you get the smallest total that still covers
-it, with the excess landing at the same destination. Only a genuinely insufficient
-balance fails.
+```rust
+use curvy_sdk::{Account, PendingNote, scan_pending_note};
 
-**The pool must be funded before the first `deposit_funds_to`.** It spends
-committed notes it already owns and the trait has no funding hook, so something has
-to seed it. A long-running node wants a replenishment policy.
+if let Some(discovered) = scan_pending_note(&account, &pending_note)? {
+    persist_until_commit(discovered.into_owned_note())?;
+}
+```
 
-**Recovery is conservative.** Lost submission responses are reconciled from direct
-note/nullifier state, and shield/commit/withdrawal stages are persisted. A hard process
-death inside aggregation proving/submission can still precede persistence of its random
-outputs; that reservation fails closed for manual reconciliation instead of risking a
-second spend.
+Contract `PendingNotes` events contain parallel arrays and may hold multiple
+notes. `PendingNotesEvent::notes()` validates and normalizes those arrays;
+`scan_pending_event` scans the complete event and returns every owned note. A
+successful discovery contains the complete `OwnedNote` required for durable
+pending-to-committed correlation and later spending. The existing
+`CurvyClient::scan` remains available when the SDK itself should query all indexed
+events.
 
 ## Output shape
 
@@ -149,14 +150,22 @@ Both reconcile against the aggregator's on-chain root before anything is spent.
 
 ## Artifacts
 
-Witness graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`,
-and two compatibility profiles live under `artifacts/signet` and are
-authenticated against pinned SHA-256 digests before decompression or decoding.
-Proving keys are resolved flat under `CURVY_ZK_KEYS_DIR` and hash-checked before the
-unchecked point parser sees them. Wrong or stale files fail closed.
+Every circuit needs a witness graph and a proving key at runtime. Both are resolved the
+same way: a circuit-specific variable (`CURVY_<CIRCUIT>_GRAPH`, `CURVY_<CIRCUIT>_ZKEY`)
+wins, otherwise the file is looked up flat under `CURVY_ZK_KEYS_DIR`. Both are
+authenticated against SHA-256 digests pinned in `curvy-witnesscalc` before decompression,
+decoding, or the unchecked point parser sees them. Wrong or stale files fail closed.
 
-They are `SIGNET01` version-1 bodies inside zstd frames, 9.5 MB bundled. A stock
-`curvy-witness` 0.1.0-rc.3 reads them with no feature flags.
+The artifacts are **not** part of the published crates. They ship with this repository's
+GitHub releases; a consumer downloads the release's graphs and keys into one directory
+and points `CURVY_ZK_KEYS_DIR` at it. `scripts/fetch-keys.sh` does exactly that for this
+checkout, and copies the graphs from `artifacts/signet` alongside.
+
+The graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`, and two
+compatibility profiles are checked in under `artifacts/signet`: `SIGNET01` version-1
+bodies inside zstd frames, 9.5 MB in total, readable by a stock `curvy-witness` with no
+feature flags. The `bundled-graphs` feature of `curvy-witnesscalc` falls back to that
+directory and exists for this repository's own tests and acceptance flow only.
 
 See [artifacts/README.md](artifacts/README.md) for digests and test fixtures.
 
@@ -185,8 +194,3 @@ Check a machine before proving anything on it:
 ```bash
 ./scripts/preflight.sh
 ```
-
-## API limitation
-
-`DepositPool` does not receive a `PixAddressId`, so settlement idempotency remains
-outside this adapter.

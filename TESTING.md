@@ -45,8 +45,9 @@ To copy keys from an existing directory:
 CURVY_KEYS_SRC=/path/to/zk-keys/v2 just fetch-keys
 ```
 
-`CURVY_KEYS_URL` can provide a download base URL. Direct Cargo commands must set
-`CURVY_ZK_KEYS_DIR` or a circuit-specific key variable.
+`CURVY_KEYS_URL` can provide a download base URL. The script also copies the witness
+graphs from `artifacts/signet` next to the keys, which is the layout consumers use. Direct
+Cargo commands must set `CURVY_ZK_KEYS_DIR` or the circuit-specific variables.
 
 ## Live acceptance flow
 
@@ -136,7 +137,7 @@ fi
 
 The flow covers deposit funding and shielding, note commitment, two aggregation
 proofs, relayer-note discovery, multi-owner withdrawal, indexed nullifiers, and the
-`DepositPool` interface. Protocol transactions must report Blokli as their backend.
+direct SDK interfaces. Protocol transactions must report Blokli as their backend.
 
 ## Test organization
 

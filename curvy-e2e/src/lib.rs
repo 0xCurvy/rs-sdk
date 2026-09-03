@@ -9,9 +9,9 @@ use anyhow::{Context, Result, bail};
 use curvy_chain_api::NoteIndexSource;
 use curvy_chain_blokli::BlokliChain;
 use curvy_core::eddsa::ScalarSigningKey;
-use curvy_core::field::{Bn254Fr, Fr, fr_to_biguint, fr_to_dec};
-use curvy_core::witness::KnownOwner;
-use curvy_sdk::{Account, CurvyClient, OwnedNote, Route, TxLedger};
+use curvy_core::field::{Fr, fr_to_biguint, fr_to_dec};
+use curvy_core::stealth;
+use curvy_sdk::{Account, CurvyClient, OwnedNote, Route, ScanRecipient, TxLedger, ViewerIdentity};
 
 const OPERATOR_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -24,6 +24,8 @@ const ETH_TOKEN: u64 = 1;
 const FUNDING_GROSS_WEI: u128 = 2_000_000_000_000_000_000;
 const ALLOCATION_WEI: u128 = 50_000_000_000_000_000;
 const OWNER_COUNT: usize = 10;
+/// Number of recorded phases in the live acceptance flow.
+pub const E2E_PHASE_COUNT: usize = 9;
 /// Allocations in the first fan-out proof.
 const FIRST_FANOUT: usize = 7;
 /// Test relayer reimbursement.
@@ -152,8 +154,9 @@ impl Recorder {
             ledger,
         };
         println!(
-            "[{}/13] PASS {} ({:.1}s) - {}",
+            "[{}/{}] PASS {} ({:.1}s) - {}",
             self.phases.len() + 1,
+            E2E_PHASE_COUNT,
             outcome.name,
             outcome.elapsed.as_secs_f64(),
             outcome.detail
@@ -237,11 +240,13 @@ fn scalar_key(index: usize) -> Result<ScalarSigningKey> {
         .map_err(|error| anyhow::anyhow!(error))
 }
 
-fn allocation_owner(key: &ScalarSigningKey, index: usize, salt: u64) -> KnownOwner {
-    KnownOwner::new(
-        *key.verifying_key(),
-        Bn254Fr::from_fr(Fr::from(salt.wrapping_add(index as u64))),
-    )
+fn allocation_recipient(key: &ScalarSigningKey) -> Result<ScanRecipient> {
+    let (_unused_spend_secret, _view_secret, spend_meta_key, view_public_key) = stealth::new_meta()
+        .map_err(|error| anyhow::anyhow!("generate allocation viewer: {error}"))?;
+    Ok(ScanRecipient::new(
+        ViewerIdentity::new(spend_meta_key, view_public_key)?,
+        key.verifying_key().as_tuple(),
+    ))
 }
 
 /// Authenticate all required artifacts.
@@ -302,7 +307,7 @@ pub async fn preflight() -> Result<Preflight> {
             .with_context(|| format!("{} artifacts are not usable", circuit.label))?;
         artifacts.push((
             circuit.label.to_owned(),
-            circuit.graph_path(),
+            circuit.graph_path()?,
             circuit.zkey_path()?,
         ));
     }
@@ -440,9 +445,8 @@ pub async fn run() -> Result<E2eReport> {
         .collect::<Result<Vec<_>>>()?;
     let owners = keys
         .iter()
-        .enumerate()
-        .map(|(index, key)| allocation_owner(key, index, salt))
-        .collect::<Vec<_>>();
+        .map(allocation_recipient)
+        .collect::<Result<Vec<_>>>()?;
 
     // Relayer reimbursement output.
     let relayer_account = Account::from_poc_raw_private_key(RELAYER_SEED)?;
@@ -456,7 +460,7 @@ pub async fn run() -> Result<E2eReport> {
     // First aggregation.
     let first_allocations = owners[..FIRST_FANOUT]
         .iter()
-        .copied()
+        .cloned()
         .map(|owner| (owner, ALLOCATION_WEI))
         .collect::<Vec<_>>();
     let first = client
@@ -508,7 +512,7 @@ pub async fn run() -> Result<E2eReport> {
     // Second aggregation.
     let second_allocations = owners[FIRST_FANOUT..]
         .iter()
-        .copied()
+        .cloned()
         .map(|owner| (owner, ALLOCATION_WEI))
         .collect::<Vec<_>>();
     let second = client
@@ -595,16 +599,6 @@ pub async fn run() -> Result<E2eReport> {
         Vec::new(),
     );
 
-    // Deposit-pool interface.
-    run_deposit_pool_phase(
-        Arc::clone(&client),
-        &entry,
-        &fee_identity,
-        &mut record,
-        salt,
-    )
-    .await?;
-
     Ok(E2eReport {
         network,
         chain_id,
@@ -612,133 +606,6 @@ pub async fn run() -> Result<E2eReport> {
         delivered_wei: delivered,
         phases: record.phases,
     })
-}
-
-/// Deposit addresses served by the pool phase.
-const POOL_DEPOSIT_COUNT: usize = 4;
-/// Value allocated to each pool deposit address.
-const POOL_DEPOSIT_WEI: u128 = 20_000_000_000_000_000;
-
-/// Exercise `CurvyDepositPool` through the `DepositPool` trait.
-async fn run_deposit_pool_phase(
-    client: Arc<CurvyClient>,
-    spender: &Account,
-    fee_identity: &curvy_sdk::Identity,
-    record: &mut Recorder,
-    salt: u64,
-) -> Result<Vec<TxLedger>> {
-    use curvy_deposit_pool::{CurvyDepositPool, CurvyDepositPoolConfig, MemoryStore};
-    use hopr_api::chain::{DepositPool, PixDepositAddress, PixDepositSecret};
-    use hopr_types::crypto::keypairs::{BjjKeypair, Keypair};
-    use hopr_types::primitive::prelude::HoprBalance;
-
-    let mut config = CurvyDepositPoolConfig::new(
-        spender.clone(),
-        EXIT_SUBMITTER_PRIVATE_KEY.to_string(),
-        OPERATOR_PRIVATE_KEY.to_string(),
-        ETH_TOKEN,
-    );
-    config.fee_recipient = Some(fee_identity.clone());
-    let pool = Arc::new(CurvyDepositPool::new(
-        Arc::clone(&client),
-        config,
-        Arc::new(MemoryStore::default()),
-    )?);
-
-    // Fund the pool.
-    let funding_ledger = pool
-        .fund_from_deposit(
-            FUNDING_GROSS_WEI / 2,
-            OPERATOR_PRIVATE_KEY,
-            OPERATOR_ADDRESS,
-        )
-        .await?;
-    if pool.available_funding() == 0 {
-        bail!("deposit pool reported no funding after a successful shield");
-    }
-    record.finish(
-        "pool: fund",
-        format!("{} wei available to allocate", pool.available_funding()),
-        funding_ledger,
-    );
-
-    // Build deposit addresses and matching secrets.
-    let mut secrets = Vec::with_capacity(POOL_DEPOSIT_COUNT);
-    let mut addresses = Vec::with_capacity(POOL_DEPOSIT_COUNT);
-    for index in 0..POOL_DEPOSIT_COUNT {
-        let mut secret = [0u8; 32];
-        secret[24..].copy_from_slice(&salt.wrapping_add(index as u64 + 1).to_be_bytes());
-        let keypair = BjjKeypair::from_secret(&secret)
-            .map_err(|error| anyhow::anyhow!("dev deposit key: {error}"))?;
-        addresses.push(PixDepositAddress::Bjj(*keypair.public()));
-        secrets.push(PixDepositSecret(secret.into()));
-    }
-
-    for address in &addresses {
-        pool.deposit_funds_to(*address, HoprBalance::from(POOL_DEPOSIT_WEI))
-            .await?;
-    }
-    // Flush the partial batch.
-    let allocation_ledger = pool.flush_pending().await?;
-    record.finish(
-        "pool: deposit_funds_to",
-        format!("{POOL_DEPOSIT_COUNT} deposit addresses funded in one (2,9) proof"),
-        allocation_ledger,
-    );
-
-    // Notify the pool after commitment.
-    for address in &addresses {
-        let notified = pool
-            .notify_deposit(*address, HoprBalance::from(POOL_DEPOSIT_WEI))
-            .map_err(|error| anyhow::anyhow!("notify_deposit: {error}"))?;
-        let (_address, observed) = tokio::time::timeout(Duration::from_secs(30), notified)
-            .await
-            .context("notify_deposit did not resolve for a funded deposit address")?;
-        if observed < HoprBalance::from(POOL_DEPOSIT_WEI) {
-            bail!("notify_deposit reported {observed} below the requested deposit");
-        }
-    }
-    record.finish(
-        "pool: notify_deposit",
-        format!("{POOL_DEPOSIT_COUNT} arrivals confirmed"),
-        Vec::new(),
-    );
-
-    // Sweep every deposit in one proof.
-    let before = client.eth_balance(DESTINATION).await?;
-    let destination: hopr_types::primitive::prelude::Address = DESTINATION
-        .parse()
-        .map_err(|error| anyhow::anyhow!("destination address: {error:?}"))?;
-    let outcomes = pool
-        .withdraw_multiple_deposits(&secrets, destination)
-        .await
-        .map_err(|error| anyhow::anyhow!("withdraw_multiple_deposits: {error}"))?;
-
-    let mut ledger = Vec::new();
-    for outcome in outcomes {
-        let (_address, rows) =
-            outcome.map_err(|error| anyhow::anyhow!("a pool withdrawal failed: {error}"))?;
-        ledger.extend(rows);
-    }
-    let after = client.eth_balance(DESTINATION).await?;
-    if after <= before {
-        bail!("pool withdrawal did not increase the destination balance");
-    }
-    // Confirm each address is empty.
-    for address in &addresses {
-        if !pool.deposits_for(address).is_empty() {
-            bail!("a swept deposit address still records spendable notes");
-        }
-    }
-    record.finish(
-        "pool: withdraw_multiple_deposits",
-        format!(
-            "{POOL_DEPOSIT_COUNT} deposits swept in one (10,30) proof, +{} wei",
-            after - before
-        ),
-        ledger.clone(),
-    );
-    Ok(ledger)
 }
 
 #[cfg(test)]

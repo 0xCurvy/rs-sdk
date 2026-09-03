@@ -3,6 +3,8 @@ name = "curvy-e2e"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 # Live acceptance flow through Blokli.
@@ -13,13 +15,13 @@ path = "src/main.rs"
 
 [dependencies]
 curvy-core = { workspace = true }
-curvy-sdk = { path = "../curvy-sdk" }
-curvy-chain-api = { path = "../curvy-chain-api" }
-curvy-chain-blokli = { path = "../curvy-chain-blokli" }
-curvy-deposit-pool = { path = "../curvy-deposit-pool" }
-hopr-api = { version = "1.18.0", features = ["chain", "types-chain"] }
-hopr-types = { version = "2.1.1", features = ["crypto"] }
-curvy-types = { path = "../curvy-types" }
+curvy-sdk = { workspace = true }
+# The acceptance flow runs from this checkout, so the graphs in `artifacts/signet` are
+# its last resort when `CURVY_ZK_KEYS_DIR` holds only the proving keys.
+curvy-witnesscalc = { workspace = true, features = ["bundled-graphs"] }
+curvy-chain-api = { workspace = true }
+curvy-chain-blokli = { workspace = true }
+curvy-types = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
