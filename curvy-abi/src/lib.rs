@@ -2,6 +2,9 @@
 
 use alloy::primitives::{Address, U256};
 use anyhow::{Context, Result};
+/// The shared wire types these encoders speak, re-exported so a caller building a payload for
+/// [`relay_request_key`] need not depend on `curvy-types` directly.
+pub use curvy_types;
 use curvy_types::{
     CommittedNotesEvent, CommittedNullifiersEvent, Dec, Groth16Proof, OnchainNote,
     PendingNotesEvent, RawTx,
