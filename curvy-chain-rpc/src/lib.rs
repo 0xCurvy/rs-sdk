@@ -258,8 +258,12 @@ impl BalanceReader for RpcChain {
             .to_string())
     }
     async fn tx_count(&self, a: &Addr) -> Result<u64> {
+        // Pending, not latest. The default block is `latest`, which omits anything still in the
+        // mempool — so a second transaction sent before the first is mined would be handed the
+        // nonce the first already took.
         self.provider
             .get_transaction_count(addr(a)?)
+            .pending()
             .await
             .map_err(transport)
     }

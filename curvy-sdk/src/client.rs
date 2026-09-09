@@ -344,6 +344,50 @@ struct Storage {
     tree_leaves: Vec<Fr>,
 }
 
+/// What this client has already spent for one signer.
+///
+/// Necessary because no backend reports a nonce we can trust immediately after sending: the RPC
+/// backend can be asked for the pending count, but an indexer-backed one answers from its own
+/// view, which still lags a block it has just seen mined. A deposit sends its aggregation and its
+/// commitment about half a second apart, so the second call would read the count from before the
+/// first and reuse its nonce.
+#[derive(Debug, Default)]
+struct SignerNonce {
+    /// The next nonce to use, once this client has actually spent one.
+    ///
+    /// `None` means "ask the chain" — the state before the first send, and what a failed
+    /// submission resets to so a wrong guess cannot persist.
+    next: Option<u64>,
+}
+
+impl SignerNonce {
+    /// The nonce to sign with, given what the backend currently reports.
+    ///
+    /// The larger of the two wins. The chain is authoritative when it is ahead — another signer
+    /// shares this key, or our own view is stale — and ours is when the backend has not yet
+    /// caught up with what we sent.
+    fn resolve(&self, reported: u64) -> u64 {
+        self.next.map_or(reported, |next| next.max(reported))
+    }
+
+    /// Record that `nonce` reached the chain, whether or not the call itself succeeded.
+    ///
+    /// A reverted transaction still consumes its nonce, so this is deliberately not conditional
+    /// on success.
+    fn spent(&mut self, nonce: u64) {
+        self.next = Some(nonce.saturating_add(1));
+    }
+
+    /// Forget what we believe, so the next send re-derives it from the chain.
+    ///
+    /// Used when a submission definitively failed. Holding on to a value the chain never saw
+    /// would leave every later transaction sitting at a future nonce, mining nothing and saying
+    /// nothing — far worse than the reuse this cache exists to prevent.
+    fn forget(&mut self) {
+        self.next = None;
+    }
+}
+
 /// Chain adapters used by the client.
 pub struct CurvyClient {
     pub blokli: Arc<dyn TxSubmitter>,
@@ -358,7 +402,7 @@ pub struct CurvyClient {
     pub chain_id: u64,
     storage: Mutex<Storage>,
     /// Per-signer transaction locks.
-    nonce_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    nonce_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<SignerNonce>>>>,
 }
 
 impl CurvyClient {
@@ -493,11 +537,14 @@ impl CurvyClient {
             Arc::clone(
                 locks
                     .entry(signer_addr.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(SignerNonce::default()))),
             )
         };
-        let _nonce_guard = nonce_lock.lock().await;
-        let nonce = self.balances.tx_count(&signer_addr).await?;
+        // Held across the whole send: the guard both serialises signers and carries what this
+        // client has already spent, which is the part a backend's own count cannot be trusted for.
+        let mut nonce_state = nonce_lock.lock().await;
+        let reported = self.balances.tx_count(&signer_addr).await?;
+        let nonce = nonce_state.resolve(reported);
         let gas_price = self
             .balances
             .gas_price()
@@ -527,10 +574,20 @@ impl CurvyClient {
                 | ChainError::Ambiguous(_)
                 | ChainError::Decode(_)),
             ) => {
+                // Deliberately leaves the cached nonce alone. The transaction may or may not have
+                // landed, and of the two ways to be wrong, reusing a spent nonce is the one that
+                // fails loudly and recoverably; skipping one strands every transaction after it.
                 return Err(AmbiguousSubmission { ledger, source }.into());
             }
-            Err(error) => return Err(anyhow::Error::new(error).context(format!("{label} submit"))),
+            Err(error) => {
+                // A definite refusal: nothing was mined under this nonce, and our guess may be
+                // what the backend rejected. Re-derive it from the chain next time.
+                nonce_state.forget();
+                return Err(anyhow::Error::new(error).context(format!("{label} submit")));
+            }
         };
+        // Mined. The nonce is spent even if the call itself reverted below.
+        nonce_state.spent(nonce);
         if !outcome.tx_hash.eq_ignore_ascii_case(&ledger.tx_hash) {
             return Err(AmbiguousSubmission {
                 source: ChainError::Decode(format!(
@@ -2093,6 +2150,72 @@ fn real_gas_fee_proof(fees: &FeeConfig, token_dec: &str) -> Result<(Vec<String>,
 
 #[cfg(test)]
 mod tests {
+    use super::SignerNonce;
+
+    // The bug these guard: a deposit sends its aggregation and then its pending-notes commitment
+    // about 600 ms apart, on one key. Every backend reports a count that can still be behind the
+    // first send — an indexer answers from its own lagging view even after the block is mined —
+    // so the second send read the pre-aggregation count and reused its nonce.
+
+    #[test]
+    fn a_fresh_signer_takes_the_chains_word() {
+        // Nothing sent yet, so there is nothing better to go on.
+        assert_eq!(SignerNonce::default().resolve(7), 7);
+    }
+
+    #[test]
+    fn a_lagging_backend_does_not_reclaim_a_spent_nonce() {
+        let mut nonce = SignerNonce::default();
+        let first = nonce.resolve(7);
+        assert_eq!(first, 7);
+        nonce.spent(first);
+        // The backend has not caught up — this is exactly the 600 ms window that broke deposits.
+        assert_eq!(nonce.resolve(7), 8, "a stale count must not hand back a spent nonce");
+    }
+
+    #[test]
+    fn a_chain_that_is_ahead_wins() {
+        let mut nonce = SignerNonce::default();
+        nonce.spent(nonce.resolve(7));
+        // Another sender shares this key, or our own view is stale. Theirs is authoritative:
+        // holding our lower value would sit behind their transactions forever.
+        assert_eq!(nonce.resolve(20), 20);
+    }
+
+    #[test]
+    fn a_revert_still_consumes_its_nonce() {
+        let mut nonce = SignerNonce::default();
+        let used = nonce.resolve(3);
+        // `spent` is called for a mined transaction whether or not the call succeeded, because
+        // the chain charges the nonce either way.
+        nonce.spent(used);
+        assert_eq!(nonce.resolve(3), 4);
+    }
+
+    #[test]
+    fn a_refused_submission_defers_to_the_chain_again() {
+        let mut nonce = SignerNonce::default();
+        nonce.spent(nonce.resolve(7));
+        assert_eq!(nonce.resolve(7), 8);
+        nonce.forget();
+        // Keeping 8 after a refusal would strand every later transaction at a nonce the chain
+        // never reaches — silently, since a future nonce simply never mines.
+        assert_eq!(nonce.resolve(7), 7, "a refused send must not leave a gap behind");
+    }
+
+    #[test]
+    fn consecutive_sends_advance_one_at_a_time() {
+        let mut nonce = SignerNonce::default();
+        let mut used = Vec::new();
+        // A backend frozen at 4 for the whole burst — the worst case, and the one that broke.
+        for _ in 0..4 {
+            let next = nonce.resolve(4);
+            used.push(next);
+            nonce.spent(next);
+        }
+        assert_eq!(used, vec![4, 5, 6, 7]);
+    }
+
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
