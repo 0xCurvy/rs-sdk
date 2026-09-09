@@ -12,7 +12,7 @@ use curvy_core::witness::{
     KnownOwner, NoteSigner, Proof, SeedNoteSigner, build_aggregation, build_pending_commitment,
     build_withdrawal_with_signer,
 };
-use curvy_types::{FeeConfig, OnchainNote, TxOutcome};
+use curvy_types::{FeeConfig, Groth16Proof, OnchainNote, TxOutcome};
 use curvy_witnesscalc::pix::{build_pix_aggregation_with_signer, build_pix_multi_owner_withdrawal};
 use num_bigint::BigUint;
 use sha3::{Digest, Keccak256};
@@ -138,6 +138,81 @@ impl PreparedDeposit {
             gross,
             recovery,
         }
+    }
+}
+
+/// A proved PIX aggregation that has not been submitted.
+///
+/// The output of [`CurvyClient::build_pix_aggregation`], and everything a caller needs either to
+/// submit it themselves ([`CurvyClient::submit_pix_aggregation`]) or to hand it to Curvy's
+/// off-chain relayer, which takes the proof and public signals rather than a signed transaction.
+///
+/// The two relayer keys are computed here rather than by the caller because they are derived from
+/// this exact proof: the relayer recomputes both and rejects a mismatch.
+#[derive(Clone, Debug)]
+pub struct PixAggregationRequest {
+    pub proof: Groth16Proof,
+    pub public_signals: Vec<String>,
+    /// The verifier profile's input count — `2` for PIX aggregation, and the `maxInputs` the
+    /// relayer payload carries.
+    pub max_inputs: usize,
+    pub allocations: Vec<OwnedNote>,
+    pub change: OwnedNote,
+    pub relayer: Option<OwnedNote>,
+    /// Every emitted note in on-chain order, fee note included.
+    pub emitted_notes: Vec<OwnedNote>,
+    /// The relayer's idempotency key for this submission.
+    pub request_key: String,
+    /// The relayer's key for the note set this spends.
+    pub spend_key: String,
+}
+
+impl PixAggregationRequest {
+    /// The aggregator calldata for submitting this proof directly.
+    pub fn calldata(&self) -> Result<Vec<u8>> {
+        curvy_abi::encode_submit_aggregation(
+            PIX_AGGREGATION_MAX_INPUTS,
+            PIX_AGGREGATION_MAX_OUTPUTS,
+            &self.proof,
+            &self.public_signals,
+        )
+    }
+
+    /// The result this submission produces, once it is on chain.
+    fn into_result(self, ledger: Vec<TxLedger>) -> PixAggregationResult {
+        PixAggregationResult {
+            allocations: self.allocations,
+            change: self.change,
+            relayer: self.relayer,
+            emitted_notes: self.emitted_notes,
+            ledger,
+        }
+    }
+}
+
+/// A proved PIX withdrawal that has not been submitted.
+///
+/// The withdrawal counterpart to [`PixAggregationRequest`]. Unlike an aggregation, a relayed
+/// withdrawal needs no fee note: the vault reimburses the submitter's gas on chain, which is why
+/// the relayer does not gate withdrawals on a paymaster quote.
+#[derive(Clone, Debug)]
+pub struct PixWithdrawalRequest {
+    pub proof: Groth16Proof,
+    pub public_signals: Vec<String>,
+    /// The verifier profile's input count — `10` for PIX withdrawal.
+    pub max_inputs: usize,
+    /// What the destination receives, after the deployment's withdrawal fee and gas.
+    pub delivered: u128,
+    /// The nullifiers this withdrawal spends, for resolving an ambiguous submission.
+    nullifiers: Vec<Fr>,
+    pub request_key: String,
+    pub spend_key: String,
+}
+
+impl PixWithdrawalRequest {
+    /// The aggregator calldata for submitting this proof directly.
+    pub fn calldata(&self) -> Result<Vec<u8>> {
+        curvy_abi::encode_submit_withdrawal(PIX_WITHDRAWAL_MAX_INPUTS, &self.proof, &self.public_signals)
     }
 }
 
@@ -1217,19 +1292,25 @@ impl CurvyClient {
         Ok((b_note, vec![ledger]))
     }
 
-    /// Execute verifier profile `(2, 9)` with allocations, change, an optional
-    /// stealth relayer note and a fee note.
+    /// Prove verifier profile `(2, 9)` — allocations, change, an optional stealth relayer note
+    /// and a fee note — without submitting it.
+    ///
+    /// Split from submission so the proof can be handed to Curvy's off-chain relayer, which takes
+    /// proof and public signals rather than a signed transaction. A caller that pays its own gas
+    /// wants [`aggregate_pix_allocations`](Self::aggregate_pix_allocations) instead.
+    ///
+    /// `relayer` is the gas-reimbursement note a relayer requires: a stealth output addressed to
+    /// its operator, worth at least the operator's live gas quote. It is unrelated to *how* the
+    /// proof is submitted — a self-submitting caller passes `None`.
     #[allow(clippy::too_many_arguments)]
-    pub async fn aggregate_pix_allocations(
+    pub async fn build_pix_aggregation(
         &self,
         spender: &Account,
         input_notes: &[OwnedNote],
         allocations: &[(crate::account::ScanRecipient, u128)],
         relayer: Option<(&Identity, u128)>,
         fee_recipient: Option<&Identity>,
-        submitter_priv: &str,
-        route: Route,
-    ) -> Result<PixAggregationResult> {
+    ) -> Result<PixAggregationRequest> {
         if input_notes.is_empty() || input_notes.len() > PIX_AGGREGATION_MAX_INPUTS as usize {
             bail!("PIX aggregation requires one or two committed input notes");
         }
@@ -1412,14 +1493,46 @@ impl CurvyClient {
         .await
         .context("join PIX aggregation proof")??;
         let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
-        let calldata = curvy_abi::encode_submit_aggregation(
-            PIX_AGGREGATION_MAX_INPUTS,
-            PIX_AGGREGATION_MAX_OUTPUTS,
+        let mut emitted_notes = regular_outputs;
+        emitted_notes.push(fee);
+        let request_key = curvy_abi::relay_request_key(
+            curvy_abi::RelayAction::Aggregation,
+            self.chain_id,
+            PIX_AGGREGATION_MAX_INPUTS as usize,
             &proof,
             &bundle.public_signals,
         )?;
-        let mut emitted_notes = regular_outputs;
-        emitted_notes.push(fee);
+        let spend_key = curvy_abi::relay_spend_key(
+            curvy_abi::RelayAction::Aggregation,
+            self.chain_id,
+            PIX_AGGREGATION_MAX_INPUTS as usize,
+            &bundle.public_signals,
+        )?;
+        Ok(PixAggregationRequest {
+            proof,
+            public_signals: bundle.public_signals,
+            max_inputs: PIX_AGGREGATION_MAX_INPUTS as usize,
+            allocations: allocation_notes,
+            change,
+            relayer: relayer_note,
+            emitted_notes,
+            request_key,
+            spend_key,
+        })
+    }
+
+    /// Submits a built PIX aggregation from this node, paying its own gas.
+    ///
+    /// The counterpart to handing [`PixAggregationRequest`] to the relayer. An ambiguous
+    /// submission is resolved the same way it always was: by asking the chain whether any output
+    /// note appeared, and reporting [`AmbiguousPixAggregation`] when it cannot tell.
+    pub async fn submit_pix_aggregation(
+        &self,
+        request: PixAggregationRequest,
+        submitter_priv: &str,
+        route: Route,
+    ) -> Result<PixAggregationResult> {
+        let calldata = request.calldata()?;
         let submitted = self
             .submit_call(
                 submitter_priv,
@@ -1438,20 +1551,15 @@ impl CurvyClient {
                     return Err(error);
                 };
                 let recovered = ambiguous.ledger.clone();
-                let output_ids = emitted_notes
+                let output_ids = request
+                    .emitted_notes
                     .iter()
                     .filter(|note| note.amount != Fr::from(0u64))
                     .map(OwnedNote::note_id)
                     .collect::<Vec<_>>();
                 if !self.wait_for_note_statuses(&output_ids, &[1, 2]).await {
                     return Err(AmbiguousPixAggregation {
-                        result: PixAggregationResult {
-                            allocations: allocation_notes,
-                            change,
-                            relayer: relayer_note,
-                            emitted_notes,
-                            ledger: vec![recovered],
-                        },
+                        result: request.into_result(vec![recovered]),
                         source: error,
                     }
                     .into());
@@ -1459,15 +1567,31 @@ impl CurvyClient {
                 recovered
             }
         };
-
-        Ok(PixAggregationResult {
-            allocations: allocation_notes,
-            change,
-            relayer: relayer_note,
-            emitted_notes,
-            ledger: vec![ledger],
-        })
+        Ok(request.into_result(vec![ledger]))
     }
+
+    /// Execute verifier profile `(2, 9)`: build the proof, then submit it from this node.
+    ///
+    /// A compose of [`build_pix_aggregation`](Self::build_pix_aggregation) and
+    /// [`submit_pix_aggregation`](Self::submit_pix_aggregation), kept so that callers which pay
+    /// their own gas need not know the two steps exist.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn aggregate_pix_allocations(
+        &self,
+        spender: &Account,
+        input_notes: &[OwnedNote],
+        allocations: &[(crate::account::ScanRecipient, u128)],
+        relayer: Option<(&Identity, u128)>,
+        fee_recipient: Option<&Identity>,
+        submitter_priv: &str,
+        route: Route,
+    ) -> Result<PixAggregationResult> {
+        let request = self
+            .build_pix_aggregation(spender, input_notes, allocations, relayer, fee_recipient)
+            .await?;
+        self.submit_pix_aggregation(request, submitter_priv, route).await
+    }
+
 
     // Withdrawal.
 
@@ -1665,13 +1789,11 @@ impl CurvyClient {
     /// Withdraw up to ten committed notes whose BabyJubJub signing scalars are
     /// unrelated. Each real slot is authorized by its own scalar and the fixed
     /// circuit is padded to ten slots before profile `(10)` is submitted.
-    pub async fn withdraw_pix_multi_owner(
+    pub async fn build_pix_withdrawal(
         &self,
         spends: &[(&ScalarSigningKey, &OwnedNote)],
         destination: &str,
-        submitter_priv: &str,
-        route: Route,
-    ) -> Result<(u128, Vec<TxLedger>)> {
+    ) -> Result<PixWithdrawalRequest> {
         if spends.is_empty() || spends.len() > PIX_WITHDRAWAL_MAX_INPUTS as usize {
             bail!("PIX multi-owner withdrawal requires between one and ten notes");
         }
@@ -1758,11 +1880,6 @@ impl CurvyClient {
         .await
         .context("join PIX multi-owner withdrawal proof")??;
         let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
-        let calldata = curvy_abi::encode_submit_withdrawal(
-            PIX_WITHDRAWAL_MAX_INPUTS,
-            &proof,
-            &bundle.public_signals,
-        )?;
         // Complete fallible calculations before submission.
         let total = spends.iter().try_fold(0u128, |total, (_, note)| {
             total
@@ -1773,6 +1890,38 @@ impl CurvyClient {
         let token_decimal = fr_to_dec(&token);
         let withdrawal_gas = parse_withdrawal_gas(&fees, &token_decimal)?;
         let delivered = withdrawal_net(total, fees.withdrawal_fee_bps, withdrawal_gas)?;
+        let request_key = curvy_abi::relay_request_key(
+            curvy_abi::RelayAction::Withdrawal,
+            self.chain_id,
+            PIX_WITHDRAWAL_MAX_INPUTS as usize,
+            &proof,
+            &bundle.public_signals,
+        )?;
+        let spend_key = curvy_abi::relay_spend_key(
+            curvy_abi::RelayAction::Withdrawal,
+            self.chain_id,
+            PIX_WITHDRAWAL_MAX_INPUTS as usize,
+            &bundle.public_signals,
+        )?;
+        Ok(PixWithdrawalRequest {
+            proof,
+            public_signals: bundle.public_signals,
+            max_inputs: PIX_WITHDRAWAL_MAX_INPUTS as usize,
+            delivered,
+            nullifiers: spends.iter().map(|(_, note)| note.nullifier()).collect(),
+            request_key,
+            spend_key,
+        })
+    }
+
+    /// Submits a built PIX withdrawal from this node, paying its own gas.
+    pub async fn submit_pix_withdrawal(
+        &self,
+        request: &PixWithdrawalRequest,
+        submitter_priv: &str,
+        route: Route,
+    ) -> Result<(u128, Vec<TxLedger>)> {
+        let calldata = request.calldata()?;
         let submitted = self
             .submit_call(
                 submitter_priv,
@@ -1791,17 +1940,29 @@ impl CurvyClient {
                     return Err(error);
                 };
                 let recovered = ambiguous.ledger.clone();
-                let nullifiers = spends
-                    .iter()
-                    .map(|(_, note)| note.nullifier())
-                    .collect::<Vec<_>>();
-                if !self.wait_for_nullifiers(&nullifiers).await {
+                if !self.wait_for_nullifiers(&request.nullifiers).await {
                     return Err(error);
                 }
                 recovered
             }
         };
-        Ok((delivered, vec![ledger]))
+        Ok((request.delivered, vec![ledger]))
+    }
+
+    /// Withdraw up to ten committed notes whose BabyJubJub signing scalars are unrelated, and
+    /// submit the proof from this node.
+    ///
+    /// A compose of [`build_pix_withdrawal`](Self::build_pix_withdrawal) and
+    /// [`submit_pix_withdrawal`](Self::submit_pix_withdrawal).
+    pub async fn withdraw_pix_multi_owner(
+        &self,
+        spends: &[(&ScalarSigningKey, &OwnedNote)],
+        destination: &str,
+        submitter_priv: &str,
+        route: Route,
+    ) -> Result<(u128, Vec<TxLedger>)> {
+        let request = self.build_pix_withdrawal(spends, destination).await?;
+        self.submit_pix_withdrawal(&request, submitter_priv, route).await
     }
 
     // Note scanning.

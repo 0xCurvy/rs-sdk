@@ -10,8 +10,8 @@ pub mod send;
 pub use account::{Account, Identity, OwnedNote, ScanRecipient, Viewer, ViewerIdentity};
 pub use client::{
     AmbiguousPixAggregation, AmbiguousSubmission, CurvyClient, PixAggregationResult,
-    PreparedDeposit, PreparedDirectShield, Route, TxLedger, ambiguous_pix_aggregation,
-    ambiguous_submission,
+    PixAggregationRequest, PixWithdrawalRequest, PreparedDeposit, PreparedDirectShield, Route,
+    TxLedger, ambiguous_pix_aggregation, ambiguous_submission,
 };
 pub use send::ShieldKind;
 pub use curvy_types::{PendingNote, PendingNotesEvent};
