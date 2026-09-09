@@ -178,6 +178,14 @@ impl PixAggregationRequest {
         )
     }
 
+    /// The result of a submission that someone else put on chain.
+    ///
+    /// A relayed submission has no ledger of ours to report: the relayer signed and paid for the
+    /// transaction, so the entry describing it belongs to the relayer, not to this node.
+    pub fn into_result_for_caller(self) -> PixAggregationResult {
+        self.into_result(Vec::new())
+    }
+
     /// The result this submission produces, once it is on chain.
     fn into_result(self, ledger: Vec<TxLedger>) -> PixAggregationResult {
         PixAggregationResult {
