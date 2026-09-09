@@ -240,6 +240,14 @@ impl BalanceReader for RpcChain {
             .map_err(transport)?
             .to_string())
     }
+    async fn erc20_allowance(&self, token: &Addr, owner: &Addr, spender: &Addr) -> Result<Dec> {
+        Ok(IERC20::new(addr(token)?, self.provider.clone())
+            .allowance(addr(owner)?, addr(spender)?)
+            .call()
+            .await
+            .map_err(transport)?
+            .to_string())
+    }
     async fn vault_balance(&self, owner: &Addr, token_id: &Dec) -> Result<Dec> {
         Ok(self
             .vlt()

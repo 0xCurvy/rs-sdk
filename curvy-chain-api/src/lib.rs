@@ -120,6 +120,17 @@ pub trait BalanceReader: Send + Sync {
             "ERC-20 balance reads are not supported by this backend".to_string(),
         ))
     }
+    /// `IERC20.allowance(owner, spender)`, for deciding whether an approval is still needed.
+    ///
+    /// Defaults to [`ChainError::Unsupported`] for the same reason as [`Self::erc20_balance`]:
+    /// an indexer-backed adapter exposes the chain's own token, not arbitrary contract reads. A
+    /// caller that cannot read the allowance should approve unconditionally rather than fail.
+    async fn erc20_allowance(&self, token: &Addr, owner: &Addr, spender: &Addr) -> Result<Dec> {
+        let _ = (token, owner, spender);
+        Err(ChainError::Unsupported(
+            "ERC-20 allowance reads are not supported by this backend".to_string(),
+        ))
+    }
     async fn vault_balance(&self, owner: &Addr, token_id: &Dec) -> Result<Dec>;
     async fn tx_count(&self, addr: &Addr) -> Result<u64>;
     async fn gas_price(&self) -> Result<u128>;

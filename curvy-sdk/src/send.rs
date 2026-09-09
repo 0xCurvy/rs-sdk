@@ -126,21 +126,52 @@ pub fn fee_note(
     Ok(sealed)
 }
 
-/// The net note amount an `autoShield` will commit, mirroring the contract exactly:
-/// `net = gross - (gross*depositFeeBps/10000 + portalDeployment + pendingNoteCommitment)`
-/// (integer floor).
+/// Which shield entry point a note is destined for, and therefore which gas-fee legs the vault
+/// charges it.
 ///
-/// Returns an error when the gross amount cannot cover fees.
+/// The vault takes this as `isPortalShield` and adds the portal-deployment leg only for a portal
+/// shield (`CurvyVaultV2._deposit`); a direct shield deploys nothing, so it pays only the
+/// pending-note commitment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShieldKind {
+    /// `CurvyAggregatorAlphaV2.directShield` — the caller supplies the funds itself.
+    #[default]
+    Direct,
+    /// `CurvyAggregatorAlphaV2.portalShield`, reached through a deployed entry portal.
+    Portal,
+}
+
+impl ShieldKind {
+    /// Whether the vault charges the portal-deployment gas-fee leg.
+    pub fn charges_portal_deployment(self) -> bool {
+        matches!(self, Self::Portal)
+    }
+}
+
+/// The net note amount a shield will commit, mirroring `CurvyVaultV2._deposit` exactly:
+/// `net = gross - (gross*depositFeeBps/10000 + [portalDeployment] + pendingNoteCommitment)`
+/// (integer floor), where the portal-deployment leg is charged only for a portal shield.
+///
+/// Returns an error when the gross amount cannot cover fees — the contract's
+/// `NetAmountNonPositive`, caught before the transaction is built. Note the contract reverts when
+/// `amount <= totalFees`, so an exactly-break-even gross is *not* acceptable there; this returns
+/// `Ok(0)` for that case, and callers that build a real note must reject a zero net themselves.
 pub fn shield_net_amount(
     gross: u128,
     deposit_fee_bps: u64,
     portal_deployment: u128,
     pending_note_commitment: u128,
+    kind: ShieldKind,
 ) -> Result<u128> {
     let deposit_fee = gross
         .checked_mul(deposit_fee_bps as u128)
         .context("deposit fee multiplication overflow")?
         / 10_000;
+    let portal_deployment = if kind.charges_portal_deployment() {
+        portal_deployment
+    } else {
+        0
+    };
     let fee_amount = deposit_fee
         .checked_add(portal_deployment)
         .and_then(|amount| amount.checked_add(pending_note_commitment))
@@ -182,13 +213,13 @@ mod tests {
 
     #[test]
     fn shield_fee_overflow_is_reported() {
-        let error = shield_net_amount(u128::MAX, u64::MAX, 0, 0).unwrap_err();
+        let error = shield_net_amount(u128::MAX, u64::MAX, 0, 0, ShieldKind::Portal).unwrap_err();
         assert!(error.to_string().contains("overflow"));
     }
 
     #[test]
     fn shield_fee_addition_overflow_is_reported() {
-        let error = shield_net_amount(u128::MAX, 0, u128::MAX, 1).unwrap_err();
+        let error = shield_net_amount(u128::MAX, 0, u128::MAX, 1, ShieldKind::Portal).unwrap_err();
         assert!(error.to_string().contains("overflow"));
     }
 

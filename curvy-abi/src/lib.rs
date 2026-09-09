@@ -15,6 +15,8 @@ pub mod bindings {
             interface IERC20 {
                 function transfer(address to, uint256 amount) external returns (bool);
                 function balanceOf(address owner) external view returns (uint256);
+                function allowance(address owner, address spender) external view returns (uint256);
+                function approve(address spender, uint256 amount) external returns (bool);
             }
         }
     }
@@ -124,6 +126,36 @@ pub fn encode_deploy_shield_portal(note: &OnchainNote, recovery: &str) -> Result
         bindings::portal_factory::PortalFactory::deployShieldPortalCall { note: n, recovery }
             .abi_encode(),
     )
+}
+
+/// `IERC20.approve(spender, amount)` calldata.
+///
+/// The direct-shield flow approves the **vault**, not the aggregator: the aggregator forwards the
+/// caller as `from` and the vault is what calls `safeTransferFrom` on it.
+pub fn encode_erc20_approve(spender: &str, amount: u128) -> Result<Vec<u8>> {
+    let spender: Address = spender.parse().context("parse ERC-20 approve spender")?;
+    Ok(bindings::erc20::IERC20::approveCall {
+        spender,
+        amount: U256::from(amount),
+    }
+    .abi_encode())
+}
+
+/// `CurvyAggregatorAlphaV2.directShield(note)` calldata.
+///
+/// The portal-free deposit: the caller supplies the funds itself, so no entry portal is deployed
+/// and the deployment's `portalDeployment` gas-fee leg is not charged. Requires
+/// `directShieldEnabled` on the aggregator, and — for an ERC-20 — an allowance to the vault from
+/// the same address that sends this call.
+pub fn encode_direct_shield(note: &OnchainNote) -> Result<Vec<u8>> {
+    let n = bindings::aggregator::CurvyTypes::Note {
+        ownerHash: u256_dec(&note.owner_hash)?,
+        token: u256_dec(&note.token)?,
+        amount: u256_dec(&note.amount)?,
+        ephemeralKey: u256_arr2(&note.ephemeral_key)?,
+        viewTag: note.view_tag as u16,
+    };
+    Ok(bindings::aggregator::CurvyAggregatorAlphaV2::directShieldCall { note: n }.abi_encode())
 }
 
 /// `CurvyAggregatorAlphaV2.submitAggregationRequest(...)` calldata.

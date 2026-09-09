@@ -26,7 +26,8 @@ use crate::account::{Account, Identity, OwnedNote, parse_fr_decimal};
 pub use crate::scan::Discovered;
 use crate::scan::scan_pending_events;
 use crate::send::{
-    fee_note, seal_known_owner, seal_note, seal_note_for_owner, shield_net_amount, zero_pad_note,
+    ShieldKind, fee_note, seal_known_owner, seal_note, seal_note_for_owner, shield_net_amount,
+    zero_pad_note,
 };
 
 const TREE_DEPTH: usize = 30;
@@ -137,6 +138,54 @@ impl PreparedDeposit {
             gross,
             recovery,
         }
+    }
+}
+
+/// A prepared direct shield. Persist it before submitting.
+///
+/// The portal-free counterpart to [`PreparedDeposit`]: no portal address and no recovery
+/// address, because nothing is deployed and there is no intermediate contract to recover funds
+/// from. The caller supplies the funds itself, so the only durable risk is submitting twice —
+/// which [`note`](Self::note)'s id makes detectable through
+/// [`note_status`](CurvyClient::note_status).
+#[derive(Clone, Debug)]
+pub struct PreparedDirectShield {
+    /// The note as it will exist in the pool, carrying the **net** amount after vault fees.
+    pub note: OwnedNote,
+    /// The note as the contract takes it, carrying the **gross** amount. The vault subtracts its
+    /// fees and commits `note`'s amount.
+    pub onchain_note: OnchainNote,
+    /// What leaves the caller's balance, before the vault's fees.
+    pub gross: u128,
+}
+
+impl PreparedDirectShield {
+    /// Rebuild from a durable record, mirroring [`PreparedDeposit::from_recovery_parts`].
+    pub fn from_recovery_parts(note: OwnedNote, gross: u128) -> Self {
+        let onchain_note = OnchainNote {
+            owner_hash: fr_to_dec(&note.owner_hash()),
+            token: fr_to_dec(&note.token),
+            amount: gross.to_string(),
+            ephemeral_key: [
+                fr_to_dec(&note.ephemeral_key.0),
+                fr_to_dec(&note.ephemeral_key.1),
+            ],
+            view_tag: note.view_tag as u64,
+        };
+        Self {
+            note,
+            onchain_note,
+            gross,
+        }
+    }
+
+    /// `CurvyAggregatorAlphaV2.directShield(note)` calldata.
+    ///
+    /// Exposed because a caller whose funds live behind a smart account — a Gnosis Safe, say —
+    /// submits this itself rather than through [`CurvyClient::submit_direct_shield`], which signs
+    /// with a plain EOA key.
+    pub fn calldata(&self) -> Result<Vec<u8>> {
+        curvy_abi::encode_direct_shield(&self.onchain_note)
     }
 }
 
@@ -447,6 +496,7 @@ impl CurvyClient {
             fees.deposit_fee_bps,
             portal_deployment,
             pending_commit,
+            ShieldKind::Portal,
         )?;
         let onchain_note = OnchainNote {
             owner_hash: owner_hash_dec.clone(),
@@ -579,6 +629,170 @@ impl CurvyClient {
         match deployed {
             Ok((_outcome, ledger)) => Ok(ledger),
             Err(error) => {
+                let Some(ambiguous) = ambiguous_submission(&error) else {
+                    return Err(error);
+                };
+                let recovered = ambiguous.ledger.clone();
+                if self
+                    .wait_for_note_statuses(&[prepared.note.note_id()], &[1, 2])
+                    .await
+                {
+                    Ok(recovered)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    // Direct shield (no entry portal).
+
+    /// Fix the shield note without sending a transaction, for a deposit that will be paid
+    /// straight to the aggregator.
+    ///
+    /// Unlike [`prepare_deposit`](Self::prepare_deposit) this deploys nothing, so the vault does
+    /// not charge the `portalDeployment` gas-fee leg and the net note is correspondingly larger.
+    /// Requires `directShieldEnabled` on the aggregator; a chain with the gate closed reverts
+    /// with `DirectShieldDisabled()`.
+    pub async fn prepare_direct_shield(
+        &self,
+        recipient: &Account,
+        gross: u128,
+        token: u64,
+    ) -> Result<PreparedDirectShield> {
+        let fees = self.fees.fees().await?;
+        let token_fr = Fr::from(token);
+        let token_dec = token.to_string();
+        let sealed = seal_note(&recipient.identity(), u128_fr(gross), token_fr)?;
+        let pending_commit = parse_gas_fee(&fees, &token_dec)?;
+        // `portal_deployment` is passed as zero rather than looked up: `ShieldKind::Direct`
+        // discards it anyway, and reading a fee this call never pays would only invite the two
+        // to drift apart.
+        let net = shield_net_amount(
+            gross,
+            fees.deposit_fee_bps,
+            0,
+            pending_commit,
+            ShieldKind::Direct,
+        )?;
+        if net == 0 {
+            anyhow::bail!(
+                "a direct shield of {gross} nets zero after {pending_commit} commitment fee and \
+                 the {} bps deposit fee; the vault rejects a non-positive net amount",
+                fees.deposit_fee_bps
+            );
+        }
+        let onchain_note = OnchainNote {
+            owner_hash: fr_to_dec(&sealed.owner_hash()),
+            token: token_dec,
+            amount: gross.to_string(),
+            ephemeral_key: [
+                fr_to_dec(&sealed.ephemeral_key.0),
+                fr_to_dec(&sealed.ephemeral_key.1),
+            ],
+            view_tag: sealed.view_tag as u64,
+        };
+        Ok(PreparedDirectShield {
+            note: OwnedNote {
+                amount: u128_fr(net),
+                ..sealed
+            },
+            onchain_note,
+            gross,
+        })
+    }
+
+    /// Approve the **vault** to pull `prepared.gross` for a direct shield, if it may not already.
+    ///
+    /// The vault, not the aggregator, is the spender: the aggregator forwards its caller as
+    /// `from` and the vault is what calls `safeTransferFrom`. Approving the aggregator instead
+    /// leaves the shield reverting inside the vault.
+    ///
+    /// Returns `Ok(None)` when the existing allowance already covers the amount. A non-zero but
+    /// insufficient allowance is reset to zero first, for tokens that refuse a direct
+    /// re-approval.
+    pub async fn approve_for_direct_shield(
+        &self,
+        prepared: &PreparedDirectShield,
+        token_address: &str,
+        vault_address: &str,
+        funder_priv: &str,
+        route: Route,
+    ) -> Result<Option<TxLedger>> {
+        let owner = curvy_abi::address_of(funder_priv)?;
+        // A backend that cannot read allowances (an indexer-backed one) reports `Unsupported`.
+        // Approving unconditionally is correct there, just wasteful — failing would not be.
+        let allowance = match self
+            .balances
+            .erc20_allowance(
+                &token_address.to_string(),
+                &owner,
+                &vault_address.to_string(),
+            )
+            .await
+        {
+            Ok(dec) => dec.parse::<u128>().context("parse ERC-20 allowance")?,
+            Err(curvy_chain_api::ChainError::Unsupported(_)) => 0,
+            Err(error) => return Err(anyhow::anyhow!(error)),
+        };
+        if allowance >= prepared.gross {
+            return Ok(None);
+        }
+        if allowance > 0 {
+            let reset = curvy_abi::encode_erc20_approve(vault_address, 0)?;
+            self.submit_call(
+                funder_priv,
+                token_address,
+                reset,
+                "0",
+                100_000,
+                route,
+                "shield:approve-reset",
+            )
+            .await?;
+        }
+        let calldata = curvy_abi::encode_erc20_approve(vault_address, prepared.gross)?;
+        let (_outcome, ledger) = self
+            .submit_call(
+                funder_priv,
+                token_address,
+                calldata,
+                "0",
+                100_000,
+                route,
+                "shield:approve",
+            )
+            .await?;
+        Ok(Some(ledger))
+    }
+
+    /// Submit a prepared direct shield from a plain EOA.
+    ///
+    /// A caller whose funds live behind a smart account submits
+    /// [`PreparedDirectShield::calldata`] itself instead.
+    pub async fn submit_direct_shield(
+        &self,
+        prepared: &PreparedDirectShield,
+        funder_priv: &str,
+        route: Route,
+    ) -> Result<TxLedger> {
+        let calldata = prepared.calldata()?;
+        let submitted = self
+            .submit_call(
+                funder_priv,
+                &self.aggregator,
+                calldata,
+                "0",
+                1_000_000,
+                route,
+                "shield:direct",
+            )
+            .await;
+        match submitted {
+            Ok((_outcome, ledger)) => Ok(ledger),
+            Err(error) => {
+                // Same reasoning as `shield_prepared_deposit`: an ambiguous submission is only a
+                // failure if the note never appeared.
                 let Some(ambiguous) = ambiguous_submission(&error) else {
                     return Err(error);
                 };

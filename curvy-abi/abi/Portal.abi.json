@@ -11,12 +11,22 @@
   },
   {
     "inputs": [],
+    "name": "AlreadyUsed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "BridgeCallFailed",
     "type": "error"
   },
   {
     "inputs": [],
     "name": "InsufficientBalanceForLiFiBridging",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidImmutableArgs",
     "type": "error"
   },
   {
@@ -47,6 +57,11 @@
   {
     "inputs": [],
     "name": "NoBalance",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotPortalFactory",
     "type": "error"
   },
   {
@@ -95,56 +110,15 @@
   },
   {
     "inputs": [],
-    "name": "curvyAggregator",
+    "name": "ownerHash",
     "outputs": [
       {
-        "internalType": "contract ICurvyAggregatorAlpha",
-        "name": "",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "curvyVault",
-    "outputs": [
-      {
-        "internalType": "contract ICurvyVault",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "ownerHash",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "exitAddress",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "exitChainId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "_recovery",
-        "type": "address"
-      }
-    ],
-    "name": "initialize",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -171,7 +145,7 @@
     "outputs": [
       {
         "internalType": "address",
-        "name": "",
+        "name": "value",
         "type": "address"
       }
     ],
@@ -215,11 +189,6 @@
       {
         "internalType": "address",
         "name": "curvyAggregatorAlphaProxyAddress",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "curvyVaultProxyAddress",
         "type": "address"
       }
     ],
