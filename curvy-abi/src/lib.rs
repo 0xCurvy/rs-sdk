@@ -281,6 +281,45 @@ pub fn sign_call_tx(call: CallTx<'_>) -> Result<RawTx> {
     Ok(RawTx(signed.encoded_2718()))
 }
 
+/// An EIP-1559 call to sign with raw key bytes.
+///
+/// The counterpart to [`CallTx`] for callers whose key is not a hex string: a node's signing key
+/// generally lives in a zeroizing container, and formatting it into a `String` to pass here would
+/// put a copy on the heap that nothing wipes.
+pub struct Eip1559Call<'a> {
+    /// The signer's 32 secret bytes.
+    pub signer_secret: &'a [u8],
+    pub to: [u8; 20],
+    pub calldata: Vec<u8>,
+    pub value: u128,
+    pub nonce: u64,
+    pub gas_limit: u64,
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub chain_id: u64,
+}
+
+/// Sign an EIP-1559 transaction and return EIP-2718 bytes.
+pub fn sign_eip1559_call(call: Eip1559Call<'_>) -> Result<RawTx> {
+    use alloy::consensus::{SignableTransaction, TxEip1559};
+    use alloy::eips::eip2718::Encodable2718;
+
+    let signer = PrivateKeySigner::from_slice(call.signer_secret).context("parse signer secret")?;
+    let mut tx = TxEip1559 {
+        chain_id: call.chain_id,
+        nonce: call.nonce,
+        gas_limit: call.gas_limit,
+        max_fee_per_gas: call.max_fee_per_gas,
+        max_priority_fee_per_gas: call.max_priority_fee_per_gas,
+        to: TxKind::Call(Address::from(call.to)),
+        value: U256::from(call.value),
+        access_list: Default::default(),
+        input: call.calldata.into(),
+    };
+    let sig = signer.sign_transaction_sync(&mut tx).context("sign tx")?;
+    Ok(RawTx(tx.into_signed(sig).encoded_2718()))
+}
+
 /// The EOA address for a private key (for nonce reads / balance asserts).
 pub fn address_of(priv_key_hex: &str) -> Result<String> {
     let signer: PrivateKeySigner = priv_key_hex.parse().context("parse signer key")?;
