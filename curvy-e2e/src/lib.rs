@@ -214,6 +214,28 @@ fn blokli_url() -> String {
     std::env::var("BLOKLI_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned())
 }
 
+/// Which shield the run exercises.
+///
+/// `CURVY_E2E_SHIELD=direct` targets a deployment with no entry-portal factory — the topology a
+/// HOPR node uses — where the depositor pays the aggregator itself. The default stays `portal`,
+/// so an existing deployment's run is unchanged.
+fn shield_mode() -> Result<ShieldMode> {
+    match std::env::var("CURVY_E2E_SHIELD")
+        .unwrap_or_else(|_| "portal".to_owned())
+        .as_str()
+    {
+        "portal" => Ok(ShieldMode::Portal),
+        "direct" => Ok(ShieldMode::Direct),
+        other => bail!("CURVY_E2E_SHIELD must be `portal` or `direct`, got `{other}`"),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShieldMode {
+    Portal,
+    Direct,
+}
+
 /// Resolve the per-run note salt.
 fn run_salt() -> Result<u64> {
     if let Some(value) = std::env::var_os("CURVY_E2E_SALT") {
@@ -386,6 +408,7 @@ pub async fn run() -> Result<E2eReport> {
     let mut record = Recorder::new();
     let blokli_url = blokli_url();
     let salt = run_salt()?;
+    let shield = shield_mode()?;
 
     // Preflight.
     preflight_artifacts()?;
@@ -412,24 +435,54 @@ pub async fn run() -> Result<E2eReport> {
 
     // Deposit.
     let entry = Account::from_poc_raw_private_key(ENTRY_SEED)?;
-    let prepared = client
-        .prepare_deposit(&entry, FUNDING_GROSS_WEI, ETH_TOKEN, OPERATOR_ADDRESS)
-        .await?;
-    let deposit_ledger = vec![
-        client
-            .fund_prepared_deposit(&prepared, OPERATOR_PRIVATE_KEY, Route::Blokli)
-            .await?,
-        client
-            .shield_prepared_deposit(&prepared, OPERATOR_PRIVATE_KEY, Route::Blokli)
-            .await?,
-    ];
-    let funding = prepared.note;
-    if deposit_ledger.len() != 2 || deposit_ledger.iter().any(|row| row.backend != "blokli") {
-        bail!("deposit did not submit both transactions through Blokli");
+    let (funding, deposit_ledger, deposit_label) = match shield {
+        ShieldMode::Portal => {
+            let prepared = client
+                .prepare_deposit(&entry, FUNDING_GROSS_WEI, ETH_TOKEN, OPERATOR_ADDRESS)
+                .await?;
+            let ledger = vec![
+                client
+                    .fund_prepared_deposit(&prepared, OPERATOR_PRIVATE_KEY, Route::Blokli)
+                    .await?,
+                client
+                    .shield_prepared_deposit(&prepared, OPERATOR_PRIVATE_KEY, Route::Blokli)
+                    .await?,
+            ];
+            if ledger.len() != 2 {
+                bail!("a portal deposit must fund and then shield");
+            }
+            (prepared.note, ledger, "portal")
+        }
+        ShieldMode::Direct => {
+            let prepared = client
+                .prepare_direct_shield(&entry, FUNDING_GROSS_WEI, ETH_TOKEN)
+                .await?;
+            // Native currency here, so no ERC-20 approval: the value rides on the call. An
+            // ERC-20 run would approve the *vault* first, which is what
+            // `approve_for_direct_shield` is for.
+            let ledger = vec![
+                client
+                    .submit_direct_shield(&prepared, OPERATOR_PRIVATE_KEY, Route::Blokli)
+                    .await?,
+            ];
+            // One transaction where the portal path takes two — no portal is funded and none
+            // is deployed. That difference is the whole point of this mode, so it is asserted
+            // rather than assumed.
+            if ledger.len() != 1 {
+                bail!("a direct shield must be a single transaction, got {}", ledger.len());
+            }
+            (prepared.note, ledger, "direct")
+        }
+    };
+    if deposit_ledger.iter().any(|row| row.backend != "blokli") {
+        bail!("deposit did not submit every transaction through Blokli");
     }
     record.finish(
         "deposit",
-        format!("{} wei net funding note", amount(&funding.amount)?),
+        format!(
+            "{} wei net funding note ({deposit_label} shield)",
+            amount(&funding.amount)?
+        ),
         deposit_ledger,
     );
 
