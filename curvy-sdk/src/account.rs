@@ -222,11 +222,14 @@ pub(crate) fn parse_fr_decimal(value: &str, name: &str) -> Result<Fr> {
     Ok(field)
 }
 
-/// Convert the x-coordinate of a validated secp256k1 stealth spending key into the
-/// circuit field. Unlike BN254 point coordinates, a secp256k1 coordinate is commonly
-/// larger than `Fr`; Circom's field-input semantics intentionally reduce it modulo
-/// the BN254 scalar modulus.
-pub(crate) fn shared_secret_from_spending_pub_key(value: &str) -> Result<Fr> {
+/// The x-coordinate of a validated secp256k1 stealth spending key, as the 256-bit integer
+/// every Curvy client derives it: the note's stealth shared secret before any field reduction.
+///
+/// This raw value keys the note-data cipher (`balanceCipher.ts`, the relayer's paymaster, the
+/// fee collector). The circuit hashes the same value reduced into `Fr`, see
+/// [`shared_secret_from_spending_pub_key`]; the two differ whenever x exceeds the BN254 scalar
+/// modulus, which a uniformly random secp256k1 coordinate does about four times in five.
+pub(crate) fn spending_pub_key_x(value: &str) -> Result<BigUint> {
     let (x, y) = value
         .split_once('.')
         .with_context(|| format!("spending public key not \"x.y\": {value:?}"))?;
@@ -237,7 +240,14 @@ pub(crate) fn shared_secret_from_spending_pub_key(value: &str) -> Result<Fr> {
     BigUint::parse_bytes(y.as_bytes(), 10).with_context(|| {
         format!("spending public key y is not a non-negative decimal integer: {y:?}")
     })?;
-    Ok(fr_from_biguint(&x))
+    Ok(x)
+}
+
+/// The BN254 scalar modulus, the bound a stealth shared secret must stay under for its raw
+/// and field-reduced spellings to agree.
+pub(crate) fn field_modulus() -> BigUint {
+    BigUint::parse_bytes(curvy_core::field::FIELD_MODULUS_DEC.as_bytes(), 10)
+        .expect("curvy_core spells a valid BN254 modulus")
 }
 
 /// A note this SDK owns/represents. Mirrors `curvy_core::witness::Note` but keeps
@@ -337,7 +347,7 @@ mod tests {
         let point =
             "32698479659614466080731542574241191046759570361607100919005446900112301901512.1";
         assert_eq!(
-            fr_to_biguint(&shared_secret_from_spending_pub_key(point).unwrap()).to_string(),
+            fr_to_biguint(&fr_from_biguint(&spending_pub_key_x(point).unwrap())).to_string(),
             "10810236787775190858485136828983915958211205961191066575307242713536493405895"
         );
     }

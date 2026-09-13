@@ -220,7 +220,11 @@ pub struct PixWithdrawalRequest {
 impl PixWithdrawalRequest {
     /// The aggregator calldata for submitting this proof directly.
     pub fn calldata(&self) -> Result<Vec<u8>> {
-        curvy_abi::encode_submit_withdrawal(PIX_WITHDRAWAL_MAX_INPUTS, &self.proof, &self.public_signals)
+        curvy_abi::encode_submit_withdrawal(
+            PIX_WITHDRAWAL_MAX_INPUTS,
+            &self.proof,
+            &self.public_signals,
+        )
     }
 }
 
@@ -1654,9 +1658,9 @@ impl CurvyClient {
         let request = self
             .build_pix_aggregation(spender, input_notes, allocations, relayer, fee_recipient)
             .await?;
-        self.submit_pix_aggregation(request, submitter_priv, route).await
+        self.submit_pix_aggregation(request, submitter_priv, route)
+            .await
     }
-
 
     // Withdrawal.
 
@@ -2027,7 +2031,8 @@ impl CurvyClient {
         route: Route,
     ) -> Result<(u128, Vec<TxLedger>)> {
         let request = self.build_pix_withdrawal(spends, destination).await?;
-        self.submit_pix_withdrawal(&request, submitter_priv, route).await
+        self.submit_pix_withdrawal(&request, submitter_priv, route)
+            .await
     }
 
     // Note scanning.
@@ -2170,7 +2175,11 @@ mod tests {
         assert_eq!(first, 7);
         nonce.spent(first);
         // The backend has not caught up — this is exactly the 600 ms window that broke deposits.
-        assert_eq!(nonce.resolve(7), 8, "a stale count must not hand back a spent nonce");
+        assert_eq!(
+            nonce.resolve(7),
+            8,
+            "a stale count must not hand back a spent nonce"
+        );
     }
 
     #[test]
@@ -2200,7 +2209,11 @@ mod tests {
         nonce.forget();
         // Keeping 8 after a refusal would strand every later transaction at a nonce the chain
         // never reaches — silently, since a future nonce simply never mines.
-        assert_eq!(nonce.resolve(7), 7, "a refused send must not leave a gap behind");
+        assert_eq!(
+            nonce.resolve(7),
+            7,
+            "a refused send must not leave a gap behind"
+        );
     }
 
     #[test]

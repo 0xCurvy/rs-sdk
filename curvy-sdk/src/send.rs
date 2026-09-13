@@ -8,8 +8,39 @@ use num_bigint::BigUint;
 use sha3::{Digest, Keccak256};
 
 use crate::account::{
-    Identity, OwnedNote, ViewerIdentity, parse_xy, shared_secret_from_spending_pub_key,
+    Identity, OwnedNote, ViewerIdentity, field_modulus, parse_xy, spending_pub_key_x,
 };
+
+/// Stealth-send attempts before giving up on an in-field shared secret. Each attempt lands in
+/// the field with probability about 0.19, so 256 misses is a broken RNG, not bad luck.
+const IN_FIELD_SEND_ATTEMPTS: usize = 256;
+
+/// A stealth send to `(K, V)` whose shared secret — the spending key's x coordinate — lies in
+/// the BN254 scalar field, so its raw and field-reduced spellings are one value.
+///
+/// The circuit hashes the secret reduced into `Fr`, but the note-data cipher is keyed with the
+/// raw 256-bit coordinate: `balanceCipher.ts`, the relayer's paymaster and the fee collector all
+/// decrypt with it, while `curvy_core` encrypts with the reduced one. A secret outside the field
+/// therefore yields a ciphertext no other client can open, and an output note the relayer's gate
+/// cannot recognise as its own. Redrawing the ephemeral key until the secret is in the field
+/// removes the divergence at the source without changing any wire format; it costs about five
+/// pairings per note on average.
+pub(crate) fn send_in_field(big_k: &str, big_v: &str) -> Result<(BigUint, stealth::SendOutput)> {
+    let modulus = field_modulus();
+    for _ in 0..IN_FIELD_SEND_ATTEMPTS {
+        let (_r, out) =
+            stealth::send(big_k, big_v).map_err(|e| anyhow::anyhow!("stealth send: {e}"))?;
+        let x = spending_pub_key_x(&out.spending_pub_key)
+            .context("parse stealth shared-secret point")?;
+        if x < modulus {
+            return Ok((x, out));
+        }
+    }
+    anyhow::bail!(
+        "no in-field stealth shared secret in {IN_FIELD_SEND_ATTEMPTS} attempts; the ephemeral \
+         key source is not random"
+    )
+}
 
 /// Seal an output note to a stealth recipient.
 pub fn seal_note(recipient: &Identity, amount: Fr, token: Fr) -> Result<OwnedNote> {
@@ -36,10 +67,8 @@ pub fn seal_note_for_owner(
     amount: Fr,
     token: Fr,
 ) -> Result<OwnedNote> {
-    let (_r, out) = stealth::send(&recipient.big_k, &recipient.big_v)
-        .map_err(|e| anyhow::anyhow!("stealth send: {e}"))?;
-    let shared_secret = shared_secret_from_spending_pub_key(&out.spending_pub_key)
-        .context("parse stealth shared-secret point")?;
+    let (shared_secret_raw, out) = send_in_field(&recipient.big_k, &recipient.big_v)?;
+    let shared_secret = fr_from_biguint(&shared_secret_raw);
     let ephemeral_key = parse_xy(&out.big_r)?;
     let view_tag = u16::from_str_radix(&out.view_tag, 16).context("parse stealth view tag")?;
     Ok(OwnedNote {
@@ -221,6 +250,61 @@ mod tests {
     fn shield_fee_addition_overflow_is_reported() {
         let error = shield_net_amount(u128::MAX, 0, u128::MAX, 1, ShieldKind::Portal).unwrap_err();
         assert!(error.to_string().contains("overflow"));
+    }
+
+    /// The stealth tag as the announcement carries it: the unpadded hex prefix `view_tag`
+    /// derives, which is what the `u16` in an [`OwnedNote`] was parsed from.
+    fn tag_hex(view_tag: u16) -> String {
+        format!("{view_tag:x}")
+    }
+
+    #[test]
+    fn a_sealed_note_keeps_its_stealth_secret_inside_the_field() -> Result<()> {
+        let (k, v, big_k, big_v) = stealth::new_meta()
+            .map_err(|error| anyhow::anyhow!("generate recipient fixture: {error}"))?;
+        let recipient = crate::account::Account::from_meta_keys(&k, &v)?.identity();
+        assert_eq!(
+            (recipient.big_k.as_str(), recipient.big_v.as_str()),
+            (big_k.as_str(), big_v.as_str())
+        );
+        let modulus = field_modulus();
+        // Enough draws that an unconstrained send would almost surely have left the field.
+        for _ in 0..12 {
+            let note = seal_note(&recipient, Fr::from(5_u64), Fr::from(1_u64))?;
+            let announced_r = format!(
+                "{}.{}",
+                curvy_core::field::fr_to_dec(&note.ephemeral_key.0),
+                curvy_core::field::fr_to_dec(&note.ephemeral_key.1)
+            );
+            // The recipient scans exactly as the TypeScript SDK and the relayer do, and takes
+            // the raw x coordinate as the cipher key.
+            let matches = stealth::scan(&k, &v, &[announced_r], &[tag_hex(note.view_tag)])
+                .map_err(|error| anyhow::anyhow!("scan: {error}"))?;
+            let found = matches
+                .first()
+                .expect("the recipient discovers its own note");
+            let raw = spending_pub_key_x(&found.spending_pub_key)?;
+            assert!(raw < modulus, "the raw secret must lie in the field");
+            assert_eq!(
+                curvy_core::field::fr_to_biguint(&note.shared_secret),
+                raw,
+                "raw and field-reduced secrets must be the same value"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_in_field_send_never_returns_an_out_of_field_secret() -> Result<()> {
+        let (_k, _v, big_k, big_v) = stealth::new_meta()
+            .map_err(|error| anyhow::anyhow!("generate recipient fixture: {error}"))?;
+        let modulus = field_modulus();
+        for _ in 0..24 {
+            let (x, out) = send_in_field(&big_k, &big_v)?;
+            assert!(x < modulus);
+            assert_eq!(x, spending_pub_key_x(&out.spending_pub_key)?);
+        }
+        Ok(())
     }
 
     #[test]

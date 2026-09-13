@@ -6,15 +6,13 @@
 use anyhow::{Context, Result};
 use curvy_core::{
     cipher::decrypt_amount_token,
-    field::{Fr, fr_to_biguint},
+    field::{Fr, fr_from_biguint, fr_to_biguint},
     note::{note_id, owner_hash},
     stealth,
 };
 use curvy_types::{PendingNote, PendingNotesEvent};
 
-use crate::account::{
-    Account, OwnedNote, Viewer, parse_fr_decimal, shared_secret_from_spending_pub_key,
-};
+use crate::account::{Account, OwnedNote, Viewer, parse_fr_decimal, spending_pub_key_x};
 
 /// A discovered note that passed ownership and note-ID integrity checks.
 #[derive(Clone, Debug)]
@@ -171,8 +169,11 @@ fn discover_pending_notes(
         let note = notes
             .get(index)
             .with_context(|| format!("stealth match index {index} is out of bounds"))?;
-        let shared_secret = shared_secret_from_spending_pub_key(&spending_pub_key)
-            .context("parse scanned shared-secret point")?;
+        // The cipher is keyed with the raw coordinate, the way the sender keyed it (see
+        // `send::send_in_field`); the circuit sees the same value reduced into the field.
+        let shared_secret_raw =
+            spending_pub_key_x(&spending_pub_key).context("parse scanned shared-secret point")?;
+        let shared_secret = fr_from_biguint(&shared_secret_raw);
         let ephemeral_key = (
             parse_fr_decimal(&note.ephemeral_key[0], "ephemeral key x")?,
             parse_fr_decimal(&note.ephemeral_key[1], "ephemeral key y")?,
@@ -184,13 +185,12 @@ fn discover_pending_notes(
                 parse_fr_decimal(&note.token, "plaintext note token")?,
             )
         } else {
-            let shared_secret_bytes = fr_to_biguint(&shared_secret);
             let ephemeral_x = fr_to_biguint(&ephemeral_key.0);
             let ephemeral_y = fr_to_biguint(&ephemeral_key.1);
             decrypt_amount_token(
                 parse_fr_decimal(&note.amount, "encrypted note amount")?,
                 parse_fr_decimal(&note.token, "encrypted note token")?,
-                &shared_secret_bytes,
+                &shared_secret_raw,
                 (&ephemeral_x, &ephemeral_y),
             )
         };
@@ -339,6 +339,67 @@ mod tests {
 
         pending_event.tokens.pop();
         assert!(scan_pending_event(&owner, &pending_event).is_err());
+        Ok(())
+    }
+
+    /// A note sealed the way the TypeScript SDK seals one: the ephemeral key is not redrawn, so
+    /// the shared secret usually leaves the field, and the cipher is keyed with the raw value.
+    fn typescript_sealed_note(
+        account: &Account,
+        amount: u64,
+        token: u64,
+    ) -> (OwnedNote, PendingNote) {
+        let identity = account.identity();
+        let modulus = crate::account::field_modulus();
+        let (raw, out) = loop {
+            let (_r, out) = stealth::send(&identity.big_k, &identity.big_v).expect("stealth send");
+            let raw = spending_pub_key_x(&out.spending_pub_key).expect("spending key");
+            if raw >= modulus {
+                break (raw, out);
+            }
+        };
+        let ephemeral_key = crate::account::parse_xy(&out.big_r).expect("ephemeral key");
+        let owned = OwnedNote {
+            owner_pub: identity.bjj_pub,
+            shared_secret: fr_from_biguint(&raw),
+            ephemeral_key,
+            view_tag: u16::from_str_radix(&out.view_tag, 16).expect("view tag"),
+            amount: Fr::from(amount),
+            token: Fr::from(token),
+        };
+        let encrypted = encrypt_amount_token(
+            owned.amount,
+            owned.token,
+            &raw,
+            (
+                &fr_to_biguint(&owned.ephemeral_key.0),
+                &fr_to_biguint(&owned.ephemeral_key.1),
+            ),
+        );
+        let pending = PendingNote {
+            note_id: fr_to_dec(&owned.note_id()),
+            ephemeral_key: [
+                fr_to_dec(&owned.ephemeral_key.0),
+                fr_to_dec(&owned.ephemeral_key.1),
+            ],
+            view_tag: owned.view_tag.into(),
+            token: fr_to_dec(&encrypted.encrypted_token),
+            amount: fr_to_dec(&encrypted.encrypted_amount),
+            is_plaintext: false,
+        };
+        (owned, pending)
+    }
+
+    #[test]
+    fn a_note_keyed_with_an_out_of_field_secret_is_still_discovered() -> Result<()> {
+        let owner = account(5);
+        let (owned, pending) = typescript_sealed_note(&owner, 640, 2);
+        let discovered = scan_pending_note(&owner, &pending)?
+            .context("a note keyed the TypeScript way must be discovered")?;
+        assert_eq!(discovered.amount, owned.amount);
+        assert_eq!(discovered.token, owned.token);
+        assert_eq!(discovered.shared_secret, owned.shared_secret);
+        assert_eq!(discovered.note_id, owned.note_id());
         Ok(())
     }
 
