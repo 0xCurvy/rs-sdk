@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-rc.7"
+version = "0.1.0-rc.8"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/0xCurvy/rs-sdk"
@@ -21,13 +21,13 @@ rust-version = "1.94"
 [workspace.dependencies]
 # The workspace's own crates, versioned so they can be published. Published in this
 # order: types, chain-api, abi, witnesscalc, chain-blokli, sdk.
-curvy-types = { path = "curvy-types", version = "=0.1.0-rc.7" }
-curvy-chain-api = { path = "curvy-chain-api", version = "=0.1.0-rc.7" }
-curvy-abi = { path = "curvy-abi", version = "=0.1.0-rc.7" }
-curvy-witnesscalc = { path = "curvy-witnesscalc", version = "=0.1.0-rc.7" }
-curvy-chain-blokli = { path = "curvy-chain-blokli", version = "=0.1.0-rc.7" }
-curvy-chain-rpc = { path = "curvy-chain-rpc", version = "=0.1.0-rc.7" }
-curvy-sdk = { path = "curvy-sdk", version = "=0.1.0-rc.7" }
+curvy-types = { path = "curvy-types", version = "=0.1.0-rc.8" }
+curvy-chain-api = { path = "curvy-chain-api", version = "=0.1.0-rc.8" }
+curvy-abi = { path = "curvy-abi", version = "=0.1.0-rc.8" }
+curvy-witnesscalc = { path = "curvy-witnesscalc", version = "=0.1.0-rc.8" }
+curvy-chain-blokli = { path = "curvy-chain-blokli", version = "=0.1.0-rc.8" }
+curvy-chain-rpc = { path = "curvy-chain-rpc", version = "=0.1.0-rc.8" }
+curvy-sdk = { path = "curvy-sdk", version = "=0.1.0-rc.8" }
 
 # Exact versions keep artifact evaluation reproducible: the graph and zkey digests
 # pinned in curvy-witnesscalc are only known to hold for these releases. `parallel` is
