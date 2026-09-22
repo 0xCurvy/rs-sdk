@@ -2,10 +2,12 @@
 //!
 //! Every circuit needs two artifacts at runtime: a `SIGNET01` witness graph and a Groth16
 //! proving key. Both are resolved the same way - a circuit-specific environment variable
-//! wins, otherwise the file is looked up flat under [`ARTIFACTS_DIR_ENV`] - and both are
-//! authenticated by SHA-256 before use. The artifacts ship with the SDK's GitHub releases,
-//! not with the crate. Only the `bundled-graphs` feature, meant for this repository's own
-//! tests and acceptance flow, falls back to the graphs checked into the source tree.
+//! wins, otherwise the file is looked up flat under [`ARTIFACTS_DIR_ENV`], or under the
+//! directory compiled in through [`ARTIFACTS_DIR_DEFAULT_ENV`] when that is unset - and both
+//! are authenticated by SHA-256 before use. The artifacts ship with the SDK's GitHub releases
+//! and its Nix flake, not with the crate. Only the `bundled-graphs` feature, meant for this
+//! repository's own tests and acceptance flow, falls back to the graphs checked into the
+//! source tree.
 
 use anyhow::{Context, Result, bail};
 use ark_bn254::Fr;
@@ -32,11 +34,24 @@ pub const PROOF_TIMINGS_PATH_ENV: &str = "CURVY_PROOF_TIMINGS_PATH";
 /// Directory holding the witness graphs and proving keys, flat, one file per circuit.
 ///
 /// Circuit-specific overrides (`CURVY_<CIRCUIT>_GRAPH`, `CURVY_<CIRCUIT>_ZKEY`) take
-/// precedence over it.
+/// precedence over it; [`ARTIFACTS_DIR_DEFAULT`] is the fallback when it is unset.
 pub const ARTIFACTS_DIR_ENV: &str = "CURVY_ZK_KEYS_DIR";
 
+/// Build-time name of the same variable, read when this crate is compiled.
+///
+/// A packaged build that knows where its artifacts will live — a Nix build, say, where the
+/// directory is a store path fixed at build time — sets it, and the resulting binary finds
+/// them with nothing to configure at run time. It is the last resort: [`ARTIFACTS_DIR_ENV`]
+/// and the circuit-specific variables still win when set.
+pub const ARTIFACTS_DIR_DEFAULT_ENV: &str = "CURVY_ZK_KEYS_DIR_DEFAULT";
+
+/// Artifacts directory compiled in through [`ARTIFACTS_DIR_DEFAULT_ENV`], if any.
+pub const ARTIFACTS_DIR_DEFAULT: Option<&str> = option_env!("CURVY_ZK_KEYS_DIR_DEFAULT");
+
 fn artifacts_dir() -> Option<PathBuf> {
-    std::env::var_os(ARTIFACTS_DIR_ENV).map(PathBuf::from)
+    std::env::var_os(ARTIFACTS_DIR_ENV)
+        .map(PathBuf::from)
+        .or_else(|| ARTIFACTS_DIR_DEFAULT.map(PathBuf::from))
 }
 
 static PROOF_TIMING_WRITER: OnceLock<Mutex<()>> = OnceLock::new();

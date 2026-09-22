@@ -173,6 +173,12 @@ the digests in `curvy-witnesscalc`, and takes the graphs from `artifacts/signet`
 flake input (`curvy-zk-artifacts.url = "github:0xCurvy/rs-sdk/<tag>"`) a new release is a
 tag change plus `nix flake update curvy-zk-artifacts`.
 
+A build that knows where the artifacts will live can compile the location in instead:
+`curvy-witnesscalc` reads `CURVY_ZK_KEYS_DIR_DEFAULT` at build time and falls back to it
+whenever `CURVY_ZK_KEYS_DIR` is unset at run time. Set it to the package's store path in
+a Nix build and the binary needs no variable at all; the store path in the binary also
+makes the artifacts part of its closure.
+
 The graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`, and two
 compatibility profiles are checked in under `artifacts/signet`: `SIGNET01` version-1
 bodies inside zstd frames, 9.5 MB in total, readable by a stock `curvy-witness` with no
