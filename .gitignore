@@ -9,3 +9,6 @@
 
 # Working notes on undecided design questions. Tracked issues live elsewhere.
 /open-questions.md
+
+# nix build output link.
+/result

@@ -161,6 +161,18 @@ GitHub releases; a consumer downloads the release's graphs and keys into one dir
 and points `CURVY_ZK_KEYS_DIR` at it. `scripts/fetch-keys.sh` does exactly that for this
 checkout, and copies the graphs from `artifacts/signet` alongside.
 
+Nix consumers get the same directory from this repository's flake, pinned to a tag:
+
+```bash
+nix build github:0xCurvy/rs-sdk/v0.1.0-rc.7#curvy-zk-artifacts
+CURVY_ZK_KEYS_DIR=$PWD/result
+```
+
+The package fetches the zkeys from the release matching the checkout's own version, by
+the digests in `curvy-witnesscalc`, and takes the graphs from `artifacts/signet`. As a
+flake input (`curvy-zk-artifacts.url = "github:0xCurvy/rs-sdk/<tag>"`) a new release is a
+tag change plus `nix flake update curvy-zk-artifacts`.
+
 The graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`, and two
 compatibility profiles are checked in under `artifacts/signet`: `SIGNET01` version-1
 bodies inside zstd frames, 9.5 MB in total, readable by a stock `curvy-witness` with no
