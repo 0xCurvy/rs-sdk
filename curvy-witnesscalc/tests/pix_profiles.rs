@@ -134,8 +134,8 @@ fn real_pix_withdrawal_graph_accepts_ten_unrelated_owners() {
 
 /// Every acceptance-flow circuit must produce a verifiable proof.
 #[test]
-#[ignore = "requires the evaluation zkeys via CURVY_ZK_KEYS_DIR"]
-fn real_evaluation_zkeys_prove_every_pix_flow_profile() {
+#[ignore = "requires the proving keys via CURVY_ZK_KEYS_DIR"]
+fn real_zkeys_prove_every_pix_flow_profile() {
     let pending = Circuit::pending()
         .prove(&pending_input())
         .expect("prove and verify pending-notes commitment");

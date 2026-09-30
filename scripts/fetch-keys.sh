@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch and authenticate evaluation proving keys, and place the witness graphs from
+# Fetch and authenticate the proving keys, and place the witness graphs from
 # artifacts/signet next to them, so zk-keys/v2 has the flat layout consumers point
 # CURVY_ZK_KEYS_DIR at.
 #
@@ -12,9 +12,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
-# Optional release asset base URL.
-# https://github.com/0xCurvy/rs-sdk/releases/download/<tag>
-DEFAULT_KEYS_URL="https://github.com/0xCurvy/rs-sdk/releases/download/v0.1.0"
+# The release published alongside this checkout's version, as flake.nix fetches from:
+# a pin change ships with the release that carries the new keys, so a fixed tag here
+# would keep serving the previous keys and fail every digest check.
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+DEFAULT_KEYS_URL="https://github.com/0xCurvy/rs-sdk/releases/download/v${VERSION}"
 
 KEYS_DIR="$HERE/zk-keys/v2"
 

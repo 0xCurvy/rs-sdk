@@ -22,14 +22,14 @@ allocation identifiers.
 |---|---|---|
 | Rust 1.94 | `rust-toolchain.toml` | pinned; rustup installs it on first build |
 | A C compiler | `cc` on PATH | native cryptography dependencies need it |
-| Proving keys | `zk-keys/v2` in this repo | 249 MB, gitignored; fetched and digest-checked automatically by any recipe that needs them |
+| Proving keys | `zk-keys/v2` in this repo | 278 MB, gitignored; fetched and digest-checked automatically by any recipe that needs them |
 | A Curvy-enabled Blokli + Anvil stack | `BLOKLI_URL` | the only backend this SDK talks to |
 
 The cryptography comes from the `curvy-core`, `curvy-prover` and `curvy-witness`
 crates, pinned to `=0.1.0-rc.3`.
 
-The proving keys are **evaluation setups**, adequate for local work and not
-production trusted-setup artifacts.
+The proving keys are the final output of the Gnosis trusted-setup ceremony: the
+keys the Gnosis PIX aggregator's verifiers are set up with.
 
 ## Getting a run out of it
 

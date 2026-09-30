@@ -9,7 +9,7 @@
 //! ```
 
 #[tokio::test]
-#[ignore = "requires a live Curvy-enabled Blokli stack and evaluation zkeys"]
+#[ignore = "requires a live Curvy-enabled Blokli stack and the proving keys"]
 async fn deposit_aggregate_and_withdraw_through_blokli() {
     let report = curvy_e2e::run()
         .await
