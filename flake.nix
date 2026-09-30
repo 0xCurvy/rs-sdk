@@ -45,7 +45,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit (pkgs) lib;
 
-          # The five zkeys (~290 MB) are too large for git or a crate and ship as release assets;
+          # The five zkeys (~280 MB) are too large for git or a crate and ship as release assets;
           # each is a fixed-output fetch, so a wrong or stale file fails at build time here rather
           # than at load time in a consumer. The five witness graphs are checked in under
           # `artifacts/signet` and come straight from the source tree.

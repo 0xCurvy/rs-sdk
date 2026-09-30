@@ -161,8 +161,8 @@ impl Circuit {
             graph_file: "withdrawal-2-30.signet.zst",
             graph_sha256: "04b2fa84394548a971c757c61280b81fb7699a367eeb45834201675f8a0aad74",
             zkey_env: "CURVY_WITHDRAWAL_ZKEY",
-            zkey_file: "verifySingleWithdrawalNoHashing_2_30_0001.zkey",
-            zkey_sha256: "c91d9fdbea6edde296e9676bdb97959f6acb5f32360b5490c01cea9814844716",
+            zkey_file: "verifySingleWithdrawal_2_30-final.zkey",
+            zkey_sha256: "a241bb706a69de18a6c95d6b83fc06012adc2a0e3cb7ac8688fe0fdce603f564",
             num_public: 6,
         }
     }
@@ -175,8 +175,8 @@ impl Circuit {
             graph_file: "aggregation-2-3-30.signet.zst",
             graph_sha256: "8c6eb16f41cc147fca8809804c0f0743d463aeba2ee45a02e7b32b6a27904386",
             zkey_env: "CURVY_AGGREGATION_ZKEY",
-            zkey_file: "verifySingleAggregationNoHashing_2_3_30_0001.zkey",
-            zkey_sha256: "88a85746f60820712199a60ee13241181658250ba9855af61503d306c52ba4e6",
+            zkey_file: "verifySingleAggregation_2_3_30-final.zkey",
+            zkey_sha256: "c4a15849fa57c19dd4fd43a63e60a4c902a6847310e95137b69aa895307182e6",
             num_public: 31,
         }
     }
@@ -189,8 +189,8 @@ impl Circuit {
             graph_file: "pix-aggregation-2-9-30.signet.zst",
             graph_sha256: "b974028ba40afdc067524819d61bdd9172a5e56369cfc05a75ba5d469c379c3a",
             zkey_env: "CURVY_PIX_AGGREGATION_ZKEY",
-            zkey_file: "verifyPixAggregation_2_9_30_evaluation.zkey",
-            zkey_sha256: "b4fced8a3c183d25a13a24c9ee7234ec96b77f87f688992ee07144f23ace6750",
+            zkey_file: "verifyPixAggregation_2_9_30-final.zkey",
+            zkey_sha256: "7611d3ade361c02b70b27620aca12aa8c15f7c7aba352d3e7add6409974fb13d",
             num_public: 67,
         }
     }
@@ -203,8 +203,8 @@ impl Circuit {
             graph_file: "pix-withdrawal-10-30.signet.zst",
             graph_sha256: "90d301a189ceea1a7574f410bd94e53e9da0da0e75d8bfb99d47c42295fdfa56",
             zkey_env: "CURVY_PIX_WITHDRAWAL_ZKEY",
-            zkey_file: "verifyPixMultiOwnerWithdrawal_10_30_evaluation.zkey",
-            zkey_sha256: "e18f0fdd40aa2643c31c3a02ef0a508b5c7580a436abcae88e364ee86be6a95b",
+            zkey_file: "verifyPixMultiOwnerWithdrawal_10_30-final.zkey",
+            zkey_sha256: "869080de2e351bd383e9f8f1ec84457bb6d0bf635c3f6163acf3186a982ab1ba",
             num_public: 14,
         }
     }
@@ -217,8 +217,8 @@ impl Circuit {
             graph_file: "pending-5-30.signet.zst",
             graph_sha256: "69fa449825732a0958ccd0689ad361d9e8df1223231d8b71932d0efc4a07d8f0",
             zkey_env: "CURVY_PENDING_ZKEY",
-            zkey_file: "verifyPendingNotesCommitment_5_30_0001.zkey",
-            zkey_sha256: "efb4c3d4d3350f931860faeb6319b6010303c5fbf06d8ef414d708e9cf907847",
+            zkey_file: "verifyPendingNotesCommitment_5_30-final.zkey",
+            zkey_sha256: "5a9761127ad5d0a34c3f0b9bb11d34d13d6d68afb0089c3b74d24bcb25fa7477",
             num_public: 1,
         }
     }

@@ -3,7 +3,7 @@
 *.log
 .idea/
 
-# Proving keys fetched by scripts/fetch-keys.sh. 249 MB of evaluation setups, hash
+# Proving keys fetched by scripts/fetch-keys.sh. 278 MB of trusted-setup ceremony keys, hash
 # checked at load, deliberately not in git.
 /zk-keys/
 
