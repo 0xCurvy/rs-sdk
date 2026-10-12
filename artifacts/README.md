@@ -9,7 +9,7 @@ GitHub releases do. Only the `bundled-graphs` feature, for this repository's tes
 and acceptance flow, falls back to `signet/` here.
 
 Each file is a zstd frame around a version-1 body, which a stock `curvy-witness`
-0.1.0-rc.3 accepts with no feature flags. The pinned digest is the digest of the file
+0.1.1 accepts with no feature flags. The pinned digest is the digest of the file
 as it sits on disk, compressed: that is what the evaluator is handed and therefore
 what it authenticates.
 

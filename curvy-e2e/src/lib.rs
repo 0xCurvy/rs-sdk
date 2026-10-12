@@ -8,10 +8,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use curvy_chain_api::NoteIndexSource;
 use curvy_chain_blokli::BlokliChain;
-use curvy_core::eddsa::ScalarSigningKey;
+use curvy_core::eddsa::{ScalarSigningKey, derive_public_key};
+use curvy_core::encoding::from_hex_exact;
 use curvy_core::field::{Fr, fr_to_biguint, fr_to_dec};
 use curvy_core::stealth;
-use curvy_sdk::{Account, CurvyClient, OwnedNote, Route, ScanRecipient, TxLedger, ViewerIdentity};
+use curvy_sdk::{
+    Account, CurvyClient, Identity, OwnedNote, Route, ScanRecipient, TxLedger, ViewerIdentity,
+};
 
 const OPERATOR_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -32,11 +35,32 @@ const FIRST_FANOUT: usize = 7;
 const RELAYER_REIMBURSEMENT_WEI: u128 = 1_000_000_000_000_000;
 /// Test relayer account seed.
 const RELAYER_SEED: &str = "0x5555555555555555555555555555555555555555555555555555555555555555";
-/// Local fee-collector keys.
+/// Local fee-collector keys, 31 bytes each: see [`fee_collector_identity`].
 const FEE_COLLECTOR_SPEND_PRIV: &str =
     "0000000000000000000000000000000000000000000000000feec0117ec701";
 const FEE_COLLECTOR_VIEW_PRIV: &str =
     "0000000000000000000000000000000000000000000000000feec0117ec702";
+
+/// The public identity of the dev deployment's fee collector.
+///
+/// The deployed `feeNotePublicKey` is the BabyJubJub key of the 31-byte spend seed above. That
+/// key hashes the seed's bytes, so padding the seed to the 32 bytes `Account::from_meta_keys`
+/// takes would name a different owner. The stealth meta-keys read the same hex as integers, so
+/// for them the padding changes nothing.
+fn fee_collector_identity() -> Result<Identity> {
+    let (big_k, big_v) = stealth::get_meta(
+        &format!("{FEE_COLLECTOR_SPEND_PRIV:0>64}"),
+        &format!("{FEE_COLLECTOR_VIEW_PRIV:0>64}"),
+    )
+    .map_err(|e| anyhow::anyhow!("fee-collector meta-keys: {e}"))?;
+    let seed =
+        from_hex_exact::<31>(FEE_COLLECTOR_SPEND_PRIV).context("fee-collector spend seed")?;
+    Ok(Identity {
+        big_k,
+        big_v,
+        bjj_pub: derive_public_key(&seed),
+    })
+}
 
 /// Addresses emitted by Blokli's Curvy-enabled local deployer.
 pub struct Deployed {
@@ -507,8 +531,7 @@ pub async fn run() -> Result<E2eReport> {
     let relayer = Some((&relayer_identity, RELAYER_REIMBURSEMENT_WEI));
 
     // Protocol fee recipient.
-    let fee_collector = Account::from_meta_keys(FEE_COLLECTOR_SPEND_PRIV, FEE_COLLECTOR_VIEW_PRIV)?;
-    let fee_identity = fee_collector.identity();
+    let fee_identity = fee_collector_identity()?;
 
     // First aggregation.
     let first_allocations = owners[..FIRST_FANOUT]
@@ -673,8 +696,7 @@ mod tests {
         const DEV_FEE_NOTE_PUBLIC_KEY_Y: &str =
             "5125768395023217094469327424244994953312297627197683956739233494456001838760";
 
-        let collector = Account::from_meta_keys(FEE_COLLECTOR_SPEND_PRIV, FEE_COLLECTOR_VIEW_PRIV)
-            .expect("dev fee-collector keys");
+        let collector = fee_collector_identity().expect("dev fee-collector keys");
         assert_eq!(fr_to_dec(&collector.bjj_pub.0), DEV_FEE_NOTE_PUBLIC_KEY_X);
         assert_eq!(fr_to_dec(&collector.bjj_pub.1), DEV_FEE_NOTE_PUBLIC_KEY_Y);
     }

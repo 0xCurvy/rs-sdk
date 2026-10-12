@@ -11,6 +11,7 @@ dependencies = [
  "cipher",
  "cpubits",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -1389,6 +1390,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1530,6 +1532,7 @@ dependencies = [
  "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout",
+ "zeroize",
 ]
 
 [[package]]
@@ -1741,6 +1744,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-bigint"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+dependencies = [
+ "cpubits",
+ "ctutils",
+ "num-traits",
+ "zeroize",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1779,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-abi"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -1790,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-chain-api"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "curvy-types",
@@ -1799,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-chain-blokli"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "curvy-chain-api",
@@ -1811,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-chain-rpc"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -1823,15 +1838,16 @@ dependencies = [
 
 [[package]]
 name = "curvy-core"
-version = "0.1.0-rc.6"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c3fc4ddb515fb093c886aaffb0b03eb88d0c2d17d362c3aa03d0baefbf95f12"
+checksum = "70ed262e8e4a09d5e23b46d7925bca0236cb58ebc082515120411244f295b963"
 dependencies = [
  "aes",
  "ark-bn254 0.6.0",
  "ark-ec 0.6.0",
  "ark-ff 0.6.0",
  "ark-secp256k1",
+ "crypto-bigint 0.7.5",
  "ctr",
  "getrandom 0.2.17",
  "hkdf",
@@ -1845,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-e2e"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "curvy-chain-api",
@@ -1860,9 +1876,9 @@ dependencies = [
 
 [[package]]
 name = "curvy-prover"
-version = "0.1.0-rc.6"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97569b2c10f4d08e669cf37c614bd37cce5c8ff19221bb4b2fec88c49a91f4ee"
+checksum = "3cbf5e627f6f4fd70c72b07a7d2d2802f0b86e6db27bc979be70dca10c4f77bf"
 dependencies = [
  "ark-bn254 0.6.0",
  "ark-ec 0.6.0",
@@ -1879,11 +1895,12 @@ dependencies = [
  "rayon",
  "sha2 0.11.0",
  "thiserror 2.0.19",
+ "zeroize",
 ]
 
 [[package]]
 name = "curvy-sdk"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "ark-bn254 0.6.0",
@@ -1903,29 +1920,31 @@ dependencies = [
 
 [[package]]
 name = "curvy-types"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "curvy-witness"
-version = "0.1.0-rc.6"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d10e9c22247f273c3dfb9fc6d56fb7b601c7396f9707faa7104973123d802968"
+checksum = "13b5b42b7fc39c7ba607f1a47e5a3c567d1ced7deec23ecffd6056b8ee88a05d"
 dependencies = [
  "ark-bn254 0.6.0",
  "ark-ff 0.6.0",
  "num-bigint 0.5.1",
  "ruzstd",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.19",
+ "zeroize",
 ]
 
 [[package]]
 name = "curvy-witnesscalc"
-version = "0.1.0-rc.9"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "ark-bn254 0.6.0",
@@ -2076,6 +2095,7 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -2144,7 +2164,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
 dependencies = [
  "base16ct",
- "crypto-bigint",
+ "crypto-bigint 0.5.5",
  "digest 0.10.7",
  "ff",
  "generic-array",
@@ -2615,6 +2635,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
 dependencies = [
  "typenum",
+ "zeroize",
 ]
 
 [[package]]

@@ -26,7 +26,7 @@ allocation identifiers.
 | A Curvy-enabled Blokli + Anvil stack | `BLOKLI_URL` | the only backend this SDK talks to |
 
 The cryptography comes from the `curvy-core`, `curvy-prover` and `curvy-witness`
-crates, pinned to `=0.1.0-rc.3`.
+crates, pinned to `=0.1.1`.
 
 The proving keys are the final output of the Gnosis trusted-setup ceremony: the
 keys the Gnosis PIX aggregator's verifiers are set up with.
@@ -164,7 +164,7 @@ checkout, and copies the graphs from `artifacts/signet` alongside.
 Nix consumers get the same directory from this repository's flake, pinned to a tag:
 
 ```bash
-nix build github:0xCurvy/rs-sdk/v0.1.0-rc.7#curvy-zk-artifacts
+nix build github:0xCurvy/rs-sdk/v0.1.1#curvy-zk-artifacts
 CURVY_ZK_KEYS_DIR=$PWD/result
 ```
 

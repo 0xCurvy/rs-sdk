@@ -68,7 +68,7 @@ impl ScanRecipient {
 /// that signs a withdrawal.
 #[derive(Clone)]
 pub struct Viewer {
-    /// BN254 view private key in hexadecimal.
+    /// BN254 view private key: exactly 64 unprefixed hex characters.
     pub v: String,
     /// Public secp256k1 spend meta-key `K` as `"x.y"`.
     pub big_k: String,
@@ -112,8 +112,9 @@ impl ViewerIdentity {
 }
 
 impl Account {
-    /// From explicit stealth private keys `(k, v)` (hex). Derives the public meta-keys
-    /// and the BabyJubJub owner key.
+    /// From explicit stealth private keys `(k, v)`, each exactly 64 unprefixed hex
+    /// characters; a shorter key must be left-padded by the caller. Derives the public
+    /// meta-keys and the BabyJubJub owner key.
     pub fn from_meta_keys(k: &str, v: &str) -> Result<Self> {
         let (big_k, big_v) =
             stealth::get_meta(k, v).map_err(|e| anyhow::anyhow!("get_meta: {e}"))?;
