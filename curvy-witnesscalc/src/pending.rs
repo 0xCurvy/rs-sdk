@@ -1,27 +1,38 @@
-//! Pending-notes commitment input normalization.
+//! The calldata-bound pending-notes commitment.
 //!
-//! The circuit omits `newNotesRoot` and expects `inputHash` reduced modulo the
-//! BN254 scalar field.
+//! rs-core appends the batch to the notes tree from its frontier and binds the words
+//! `commitPendingNotes` hashes, `[paddedNoteIds..., currentRoot, newRoot, currentIndex,
+//! newIndex]` ([`curvy_core::witness::build_bound_pending_commitment`]). Its circuit input
+//! carries the challenge `x`.
 
-use anyhow::{Context, Result};
-use curvy_core::field::{fr_from_dec, fr_to_dec};
-use curvy_core::witness::PendingCommitmentWitness;
-use serde_json::Value;
+use anyhow::{Context, Result, bail};
+use curvy_core::calldata::bind_calldata;
+use curvy_core::witness::BoundPendingCommitment;
 
-/// Build circuit input JSON and return its reduced public hash.
-pub fn to_circuit_input(w: &PendingCommitmentWitness) -> Result<(String, String)> {
-    // Reduce the digest to a canonical field element.
-    let reduced_input_hash = fr_to_dec(&fr_from_dec(&w.input_hash));
+use crate::{BoundProof, Circuit};
 
-    let mut input = serde_json::to_value(w).context("serialize pending witness")?;
-    let map = input
-        .as_object_mut()
-        .context("pending witness is an object")?;
-    map.remove("newNotesRoot");
-    map.insert(
-        "inputHash".into(),
-        Value::String(reduced_input_hash.clone()),
-    );
+/// The batch of the pinned circuit, `VerifyPendingNotesCommitmentBound(256, 30)`. A commit posts
+/// only its real note ids, up to this many.
+pub const BATCH_SIZE: usize = 256;
 
-    Ok((serde_json::to_string(&input)?, reduced_input_hash))
+/// Prove `commitment` with the pinned pending-notes circuit. A commitment whose binding is not the
+/// binding of its words is refused before proving.
+pub fn prove(commitment: &BoundPendingCommitment) -> Result<BoundProof> {
+    if commitment.pending_note_ids.len() != BATCH_SIZE {
+        bail!(
+            "pending-notes commitment has a batch of {}; the pinned circuit takes {BATCH_SIZE}",
+            commitment.pending_note_ids.len()
+        );
+    }
+    let words = commitment.words();
+    if bind_calldata(&words).context("bind the pending-notes commitment's words")?
+        != commitment.binding
+    {
+        bail!("pending-notes commitment: its binding is not the binding of its words");
+    }
+    Circuit::pending().prove_bound_input(
+        &commitment.circuit_input_json(),
+        words,
+        commitment.binding,
+    )
 }

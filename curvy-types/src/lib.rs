@@ -211,6 +211,43 @@ pub struct Groth16Proof {
     pub c: [Dec; 2],
 }
 
+/// A group of circuits that serve one purpose, the aggregator's `CircuitFamily`. A family's
+/// circuits are released together under one version number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CircuitFamily {
+    /// The standard circuits.
+    Core,
+    /// HOPR's PIX circuits.
+    Pix,
+}
+
+impl CircuitFamily {
+    /// The family's value in the aggregator's `CircuitFamily` enum.
+    pub fn id(self) -> u8 {
+        match self {
+            Self::Core => 0,
+            Self::Pix => 1,
+        }
+    }
+
+    /// The relayer's `circuitFamily` spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Pix => "pix",
+        }
+    }
+}
+
+/// The circuit family version a proof was made for, the aggregator's `CircuitRef`. Every
+/// submission names it, and only that version's verifier checks the proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CircuitRef {
+    pub family: CircuitFamily,
+    pub version: u64,
+}
+
 /// The aggregator's live tree state.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AggregatorState {
@@ -223,6 +260,23 @@ pub struct AggregatorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn circuit_family_matches_the_aggregator_enum_and_the_relayer_spelling() {
+        assert_eq!((CircuitFamily::Core.id(), CircuitFamily::Pix.id()), (0, 1));
+        assert_eq!(
+            (CircuitFamily::Core.as_str(), CircuitFamily::Pix.as_str()),
+            ("core", "pix")
+        );
+        let circuit = CircuitRef {
+            family: CircuitFamily::Pix,
+            version: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(circuit).unwrap(),
+            serde_json::json!({"family": "pix", "version": 1})
+        );
+    }
 
     #[test]
     fn pending_event_normalizes_parallel_arrays() {

@@ -29,8 +29,7 @@ anyhow = { workspace = true }
 num-bigint = { workspace = true }
 tracing = { workspace = true }
 
-# Independent graph evaluator and optional encoding checks.
+# Bundled graphs and the slot-allocated evaluator.
 [dev-dependencies]
 curvy-witnesscalc = { path = ".", features = ["bundled-graphs"] }
-circom-witnesscalc = "0.3.0"
 curvy-witness = { workspace = true, features = ["sage", "signet"] }

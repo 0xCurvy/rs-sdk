@@ -4,9 +4,9 @@
 # CURVY_ZK_KEYS_DIR at.
 #
 # Sources, in priority order:
-#   1. $CURVY_KEYS_URL   a base URL serving the files at their relative paths
-#   2. DEFAULT_KEYS_URL below
-#   3. $CURVY_KEYS_SRC   a local zk-keys/v2 directory to copy from, for seeding
+#   1. $CURVY_KEYS_SRC   a local directory to copy from, for seeding a release
+#   2. $CURVY_KEYS_URL   a base URL serving the files at their relative paths
+#   3. DEFAULT_KEYS_URL  this version's GitHub release (below)
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -51,22 +51,11 @@ if [ "$missing" -eq 0 ]; then
   failures=0
 fi
 
-# Resolve a source for missing keys.
-KEYS_URL="${CURVY_KEYS_URL:-$DEFAULT_KEYS_URL}"
+# Resolve a source for missing keys: a local directory when set, else a URL.
 KEYS_SRC="${CURVY_KEYS_SRC:-}"
-
-if [ -z "$KEYS_URL" ] && [ -z "$KEYS_SRC" ]; then
-  cat >&2 <<MSG
-proving keys: $missing of 5 missing from zk-keys/v2, and there is nowhere to get them.
-
-No default source is compiled in yet. Set one:
-  CURVY_KEYS_URL=https://.../          download from a base URL
-  CURVY_KEYS_SRC=/path/to/zk-keys/v2   copy from a local checkout, to seed a release
-
-Once the keys are published, set DEFAULT_KEYS_URL in this script and neither is
-needed again.
-MSG
-  exit 1
+KEYS_URL=""
+if [ -z "$KEYS_SRC" ]; then
+  KEYS_URL="${CURVY_KEYS_URL:-$DEFAULT_KEYS_URL}"
 fi
 
 mkdir -p "$KEYS_DIR"

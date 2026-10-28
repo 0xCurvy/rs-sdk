@@ -9,11 +9,11 @@ pub mod send;
 
 pub use account::{Account, Identity, OwnedNote, ScanRecipient, Viewer, ViewerIdentity};
 pub use client::{
-    AmbiguousPixAggregation, AmbiguousSubmission, CurvyClient, PixAggregationRequest,
-    PixAggregationResult, PixWithdrawalRequest, PreparedDeposit, PreparedDirectShield, Route,
-    TxLedger, ambiguous_pix_aggregation, ambiguous_submission,
+    AmbiguousPixAggregation, AmbiguousSubmission, CurvyClient, MAX_COMMIT_NOTES,
+    PixAggregationRequest, PixAggregationResult, PixWithdrawalRequest, PreparedDeposit,
+    PreparedDirectShield, Route, TxLedger, ambiguous_pix_aggregation, ambiguous_submission,
 };
-pub use curvy_types::{PendingNote, PendingNotesEvent};
+pub use curvy_types::{CircuitFamily, CircuitRef, PendingNote, PendingNotesEvent};
 pub use scan::{Discovered, scan_pending_event, scan_pending_note, scan_pending_note_with_viewer};
 pub use send::ShieldKind;
 

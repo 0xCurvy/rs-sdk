@@ -60,6 +60,22 @@
     "inputs": [
       {
         "internalType": "uint256",
+        "name": "gasFee",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxGasFee",
+        "type": "uint256"
+      }
+    ],
+    "name": "GasFeeTooHigh",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
         "name": "balance",
         "type": "uint256"
       },
@@ -80,6 +96,11 @@
   {
     "inputs": [],
     "name": "InvalidLiFiReceiver",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidMaxGasFeeBps",
     "type": "error"
   },
   {
@@ -215,6 +236,19 @@
       }
     ],
     "name": "ExitBridgePortalDeployed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "maxGasFeeBps",
+        "type": "uint256"
+      }
+    ],
+    "name": "MaxGasFeeBpsUpdated",
     "type": "event"
   },
   {
@@ -450,6 +484,19 @@
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "DEFAULT_MAX_GAS_FEE_BPS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -898,6 +945,19 @@
   },
   {
     "inputs": [],
+    "name": "maxGasFeeBps",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "owner",
     "outputs": [
       {
@@ -980,6 +1040,19 @@
       }
     ],
     "name": "revokeRole",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "newMaxGasFeeBps",
+        "type": "uint256"
+      }
+    ],
+    "name": "setMaxGasFeeBps",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

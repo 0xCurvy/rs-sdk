@@ -1,18 +1,27 @@
 //! Compatibility tests for the bundled circuit profiles.
+//!
+//! Every profile is a calldata-bound circuit. Its assignment starts `[1, commitment, y, x]`, so
+//! evaluating the graph alone checks that the words derived from an input are the words the
+//! circuit commits to; proving with the pinned keys (ignored by default) checks the assignment
+//! satisfies the circuit, since every proof is verified before it is returned.
 
 use num_bigint::BigUint;
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 
 use curvy_core::babyjubjub::BabyJubPoint;
+use curvy_core::calldata::{CalldataBinding, bind_calldata};
 use curvy_core::eddsa::{ScalarSigningKey, ephemeral_pub_key};
-use curvy_core::field::{Bn254Fr, Fr};
-use curvy_core::imt::Imt;
-use curvy_core::witness::{KnownOwner, Note, NoteSigner, Proof, build_pending_commitment};
-use curvy_witnesscalc::pending::to_circuit_input;
+use curvy_core::field::{Bn254Fr, Fr, fr_to_dec};
+use curvy_core::imt::{Imt, IndexedMerkleTree};
+use curvy_core::witness::{
+    BoundPendingCommitment, KnownOwner, Note, NoteSigner, Proof, build_aggregation_with_signer,
+    build_bound_pending_commitment, build_withdrawal_with_signer,
+};
 use curvy_witnesscalc::pix::{build_pix_aggregation_with_signer, build_pix_multi_owner_withdrawal};
-use curvy_witnesscalc::{Circuit, WitnessCalculator};
+use curvy_witnesscalc::{BOUND_PUBLIC_SIGNALS, Circuit, WitnessCalculator, pending, words};
 
 const TREE_DEPTH: usize = 30;
+const GAS_FEE_TREE_DEPTH: usize = 6;
 const TOKEN_ID: u64 = 1;
 
 fn scalar_key(value: u64) -> ScalarSigningKey {
@@ -36,7 +45,27 @@ fn proof_for(tree: &Imt, index: usize) -> Proof {
     }
 }
 
-fn pix_aggregation_input() -> String {
+/// The proof a zero-amount padding slot carries: the circuits skip its inclusion check.
+fn padding_proof() -> Proof {
+    Proof {
+        leaf_index: 0,
+        siblings: vec![Fr::from(0u64); TREE_DEPTH],
+    }
+}
+
+/// `(siblings, root)` of a gas-fee tree holding `gas_fee` at the test token's leaf.
+fn gas_fee_proof(gas_fee: Fr) -> (Vec<String>, String) {
+    let mut leaves = vec![Fr::from(0u64); TOKEN_ID as usize + 1];
+    leaves[TOKEN_ID as usize] = gas_fee;
+    let tree = Imt::from_leaves(GAS_FEE_TREE_DEPTH, &leaves);
+    let proof = tree.create_proof(TOKEN_ID as usize);
+    (
+        proof.siblings.iter().map(fr_to_dec).collect(),
+        fr_to_dec(&tree.root()),
+    )
+}
+
+fn pix_aggregation_input() -> Value {
     let owner = scalar_key(42_424_242);
     let input_notes = vec![
         note_for(*owner.verifying_key(), 10_000, 1),
@@ -72,26 +101,36 @@ fn pix_aggregation_input() -> String {
         fee_owner.verifying_key().as_tuple(),
     )
     .expect("PIX aggregation witness");
-    serde_json::to_string(&witness).expect("serialize PIX aggregation witness")
+    serde_json::to_value(&witness).expect("serialize PIX aggregation witness")
 }
 
-fn pix_withdrawal_input() -> String {
-    let keys = (0..10)
+/// Seven owners and three zero-amount padding slots, as the SDK pads a withdrawal.
+fn pix_withdrawal_input() -> Value {
+    let keys = (0..7)
         .map(|index| scalar_key(50_000 + index))
         .collect::<Vec<_>>();
-    let notes = keys
+    let mut notes = keys
         .iter()
         .enumerate()
         .map(|(index, key)| note_for(*key.verifying_key(), 100 + index as u64, 500 + index as u64))
         .collect::<Vec<_>>();
     let tree = Imt::from_leaves(TREE_DEPTH, &notes.iter().map(Note::id).collect::<Vec<_>>());
-    let proofs = (0..notes.len())
+    let mut proofs = (0..notes.len())
         .map(|index| proof_for(&tree, index))
         .collect::<Vec<_>>();
-    let signers = keys
+    let mut signers = keys
         .iter()
         .map(|key| key as &dyn NoteSigner)
         .collect::<Vec<_>>();
+    while notes.len() < 10 {
+        notes.push(note_for(
+            *keys[0].verifying_key(),
+            0,
+            600 + notes.len() as u64,
+        ));
+        proofs.push(padding_proof());
+        signers.push(&keys[0]);
+    }
     let witness = build_pix_multi_owner_withdrawal(
         &notes,
         &signers,
@@ -101,94 +140,210 @@ fn pix_withdrawal_input() -> String {
         Fr::from(TOKEN_ID),
     )
     .expect("PIX multi-owner withdrawal witness");
-    serde_json::to_string(&witness).expect("serialize PIX withdrawal witness")
+    serde_json::to_value(&witness).expect("serialize PIX withdrawal witness")
 }
 
-fn pending_input() -> String {
-    let tree = Imt::new(TREE_DEPTH);
-    let pending_note_ids = (1_u64..=5).map(Fr::from).collect::<Vec<_>>();
-    let witness = build_pending_commitment(&tree, TREE_DEPTH, 5, &pending_note_ids);
-    to_circuit_input(&witness).expect("pending circuit input").0
+/// One real input and one padding input, three outputs (the last a zero pad) and the fee note.
+fn aggregation_input() -> Value {
+    let owner = scalar_key(31_337);
+    let real = note_for(*owner.verifying_key(), 10_000, 700);
+    let tree = Imt::from_leaves(TREE_DEPTH, &[real.id()]);
+    let input_notes = vec![real, note_for(*owner.verifying_key(), 0, 701)];
+    let input_proofs = vec![proof_for(&tree, 0), padding_proof()];
+
+    let recipient = scalar_key(4_242);
+    let output_notes = vec![
+        note_for(*recipient.verifying_key(), 4_000, 710),
+        note_for(*owner.verifying_key(), 5_990, 711),
+        note_for(*owner.verifying_key(), 0, 712),
+    ];
+    let fee_owner = scalar_key(777);
+    let fee_note = note_for(*fee_owner.verifying_key(), 10, 713);
+    let gas_fee = Fr::from(10u64);
+    let witness = build_aggregation_with_signer(
+        &input_notes,
+        &input_proofs,
+        &output_notes,
+        &fee_note,
+        &owner,
+        tree.root(),
+        Fr::from(0u64),
+        gas_fee,
+        fee_owner.verifying_key().as_tuple(),
+    )
+    .expect("aggregation witness");
+    let mut input = serde_json::to_value(&witness).expect("serialize aggregation witness");
+    let (siblings, root) = gas_fee_proof(gas_fee);
+    input["gasFeeSiblings"] = siblings.into();
+    input["commitPendingNotesGasFeeRoot"] = root.into();
+    input
+}
+
+/// One real input and one padding input, as the SDK withdraws a single note.
+fn withdrawal_input() -> Value {
+    let owner = scalar_key(8_080);
+    let real = note_for(*owner.verifying_key(), 2_500, 800);
+    let tree = Imt::from_leaves(TREE_DEPTH, &[real.id()]);
+    let witness = build_withdrawal_with_signer(
+        &[real, note_for(*owner.verifying_key(), 0, 801)],
+        &owner,
+        &[proof_for(&tree, 0), padding_proof()],
+        tree.root(),
+        Fr::from(0xcafeu64),
+        Fr::from(TOKEN_ID),
+    )
+    .expect("withdrawal witness");
+    serde_json::to_value(&witness).expect("serialize withdrawal witness")
+}
+
+/// Five notes appended to a tree that already holds three.
+fn pending_commitment() -> BoundPendingCommitment {
+    let committed = (1_u64..=3).map(Fr::from).collect::<Vec<_>>();
+    let mut tree = IndexedMerkleTree::from_leaves(TREE_DEPTH, &committed).expect("notes tree");
+    let pending_note_ids = (11_u64..=15).map(Fr::from).collect::<Vec<_>>();
+    build_bound_pending_commitment(&mut tree, pending::BATCH_SIZE, &pending_note_ids)
+        .expect("bound pending commitment")
+}
+
+/// `input` with the `x` its words bind to, and that binding.
+fn bound_input(circuit: &Circuit, input: &Value) -> (String, CalldataBinding) {
+    let words = words::from_input(circuit.layout, input).expect("calldata words");
+    let binding = bind_calldata(&words).expect("bind calldata words");
+    let mut input = input.clone();
+    input["x"] = fr_to_dec(&binding.x).into();
+    (input.to_string(), binding)
+}
+
+/// Every spend profile with an input, as the bound circuit takes it, and its binding.
+fn bound_spend_inputs() -> Vec<(Circuit, String, CalldataBinding)> {
+    [
+        (Circuit::pix_aggregation(), pix_aggregation_input()),
+        (Circuit::pix_withdrawal(), pix_withdrawal_input()),
+        (Circuit::aggregation(), aggregation_input()),
+        (Circuit::withdrawal(), withdrawal_input()),
+    ]
+    .into_iter()
+    .map(|(circuit, input)| {
+        let (json, binding) = bound_input(&circuit, &input);
+        (circuit, json, binding)
+    })
+    .collect()
+}
+
+fn assert_bound(circuit: &Circuit, input_json: &str, binding: &CalldataBinding) {
+    let key = circuit.key;
+    let assignment = circuit
+        .load_calculator()
+        .unwrap_or_else(|e| panic!("{key}: {e:#}"))
+        .calculate(input_json)
+        .unwrap_or_else(|e| panic!("{key}: witness: {e:#}"));
+    assert_eq!(assignment[0], Fr::from(1u64), "{key}: constant signal");
+    assert_eq!(
+        assignment[1..=BOUND_PUBLIC_SIGNALS],
+        binding.public_signals(),
+        "{key}: the circuit's [commitment, y, x] differ from the binding of the derived words"
+    );
 }
 
 #[test]
-fn real_pix_aggregation_graph_accepts_two_to_nine_witness() {
-    let assignment = Circuit::pix_aggregation()
-        .load_calculator()
-        .expect("load pinned PIX aggregation graph")
-        .calculate(&pix_aggregation_input())
-        .expect("calculate PIX aggregation witness");
-    assert!(assignment.len() > 67);
+fn every_spend_circuit_commits_to_the_derived_words() {
+    for (circuit, input, binding) in bound_spend_inputs() {
+        assert_bound(&circuit, &input, &binding);
+    }
 }
 
 #[test]
-fn real_pix_withdrawal_graph_accepts_ten_unrelated_owners() {
-    let assignment = Circuit::pix_withdrawal()
-        .load_calculator()
-        .expect("load pinned PIX withdrawal graph")
-        .calculate(&pix_withdrawal_input())
-        .expect("calculate PIX withdrawal witness");
-    assert!(assignment.len() > 14);
-    assert_eq!(assignment[1], Fr::from(1_045u64));
+fn the_pending_circuit_commits_to_rs_cores_words() {
+    let commitment = pending_commitment();
+    assert_eq!(commitment.note_ids().len(), 5);
+    assert_eq!(commitment.current_note_index, 3);
+    assert_eq!(commitment.new_note_index, 8);
+    assert_bound(
+        &Circuit::pending(),
+        &commitment.circuit_input_json(),
+        &commitment.binding,
+    );
 }
 
-/// Every acceptance-flow circuit must produce a verifiable proof.
+#[test]
+fn words_that_disagree_with_the_circuit_change_its_commitment() {
+    let circuit = Circuit::pix_withdrawal();
+    let input = pix_withdrawal_input();
+    // A padding slot's nullifier where the circuit publishes zero.
+    let words = words::withdrawal(&input, false).expect("calldata words");
+    let binding = bind_calldata(&words).expect("bind calldata words");
+    let mut bound = input.clone();
+    bound["x"] = fr_to_dec(&binding.x).into();
+    let assignment = circuit
+        .load_calculator()
+        .expect("load graph")
+        .calculate(&bound.to_string())
+        .expect("witness");
+    assert_ne!(assignment[1], binding.commitment);
+}
+
+#[test]
+fn pending_prove_refuses_a_binding_that_is_not_of_its_words() {
+    let mut commitment = pending_commitment();
+    commitment.new_notes_root += Fr::from(1_u64);
+    let error = pending::prove(&commitment).expect_err("the words no longer match the binding");
+    assert!(
+        format!("{error:#}").contains("not the binding of its words"),
+        "{error:#}"
+    );
+}
+
+/// The multi-owner withdrawal publishes 0 for a padding slot's nullifier; deriving the nullifier
+/// instead gives words the circuit does not commit to.
 #[test]
 #[ignore = "requires the proving keys via CURVY_ZK_KEYS_DIR"]
-fn real_zkeys_prove_every_pix_flow_profile() {
-    let pending = Circuit::pending()
-        .prove(&pending_input())
-        .expect("prove and verify pending-notes commitment");
-    assert_eq!(pending.public_signals.len(), 1);
-
-    let aggregation = Circuit::pix_aggregation()
-        .prove(&pix_aggregation_input())
-        .expect("prove and verify PIX aggregation");
-    assert_eq!(aggregation.public_signals.len(), 67);
-
-    let withdrawal = Circuit::pix_withdrawal()
-        .prove(&pix_withdrawal_input())
-        .expect("prove and verify PIX multi-owner withdrawal");
-    assert_eq!(withdrawal.public_signals.len(), 14);
-}
-
-/// Both graph evaluators must produce identical assignments.
-fn assert_evaluators_agree(circuit: Circuit, input: &str, iden3_graph: &str, iden3_sha256: &str) {
-    let reference = iden3_assignment(iden3_graph, iden3_sha256, input);
-    let candidate = circuit
-        .load_calculator()
-        .expect("load pinned SIGNET01 graph")
-        .calculate(input)
-        .expect("SIGNET01 witness");
-
-    assert_eq!(
-        candidate.len(),
-        reference.len(),
-        "assignment length differs between the two evaluators"
-    );
-    assert_eq!(
-        candidate, reference,
-        "the two evaluators disagree on at least one signal"
+fn prove_bound_refuses_words_the_circuit_does_not_commit_to() {
+    let mut circuit = Circuit::pix_withdrawal();
+    circuit.layout = words::Layout::Withdrawal {
+        zero_padding_nullifiers: false,
+    };
+    let error = circuit
+        .prove_bound(&pix_withdrawal_input())
+        .expect_err("the words disagree with the circuit");
+    assert!(
+        format!("{error:#}").contains("not bound to its words"),
+        "{error:#}"
     );
 }
 
-/// Evaluate an input with the pinned reference graph.
-fn iden3_assignment(graph_name: &str, expected_sha256: &str, input: &str) -> Vec<Fr> {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../artifacts/graphs")
-        .join(graph_name);
-    let bytes = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("read iden3 reference graph {}: {e}", path.display()));
-    let actual = hex::encode(Sha256::digest(&bytes));
-    assert_eq!(
-        actual,
-        expected_sha256,
-        "stale iden3 reference graph at {} - a wrong reference would make this \
-         comparison meaningless",
-        path.display()
-    );
-    let wtns = circom_witnesscalc::calc_witness(input, &bytes).expect("iden3 witness");
-    curvy_prover::wtns::read_wtns(&wtns).expect("decode iden3 wtns")
+#[test]
+fn prove_bound_refuses_a_pending_commitment() {
+    let error = Circuit::pending()
+        .prove_bound(&serde_json::json!({}))
+        .expect_err("a pending commitment's words come from the tree");
+    assert!(format!("{error:#}").contains("pending::prove"), "{error:#}");
+}
+
+/// Every pinned circuit must produce a verifiable proof bound to its words.
+#[test]
+#[ignore = "requires the proving keys via CURVY_ZK_KEYS_DIR"]
+fn real_zkeys_prove_every_bound_profile() {
+    let commitment = pending_commitment();
+    let pending = pending::prove(&commitment).expect("prove and verify pending-notes commitment");
+    assert_eq!(pending.binding, commitment.binding);
+    assert_eq!(pending.words.len(), pending::BATCH_SIZE + 4);
+
+    for (circuit, input) in [
+        (Circuit::pix_aggregation(), pix_aggregation_input()),
+        (Circuit::pix_withdrawal(), pix_withdrawal_input()),
+        (Circuit::aggregation(), aggregation_input()),
+        (Circuit::withdrawal(), withdrawal_input()),
+    ] {
+        let key = circuit.key;
+        let proof = circuit
+            .prove_bound(&input)
+            .unwrap_or_else(|e| panic!("{key}: prove and verify: {e:#}"));
+        assert_eq!(
+            bind_calldata(&proof.words).expect("bind"),
+            proof.binding,
+            "{key}"
+        );
+    }
 }
 
 /// Every bundled graph must resolve and authenticate.
@@ -209,46 +364,19 @@ fn every_bundled_graph_pin_resolves() {
     }
 }
 
-#[test]
-fn curvy_witness_reproduces_the_pix_aggregation_assignment() {
-    assert_evaluators_agree(
-        Circuit::pix_aggregation(),
-        &pix_aggregation_input(),
-        "pix-aggregation-2-9-30.graph.bin",
-        "ca9e05f17773240882cd29b6fba616f798531e2f950ac0185274e027464351e6",
-    );
-}
-
-#[test]
-fn curvy_witness_reproduces_the_pix_withdrawal_assignment() {
-    assert_evaluators_agree(
-        Circuit::pix_withdrawal(),
-        &pix_withdrawal_input(),
-        "pix-withdrawal-10-30.graph.bin",
-        "1e23f47a4c233453bc5d3a7a550e3b12eddd3b04fa786be772dc06d2cf9ebf24",
-    );
-}
-
-/// The withdrawal profile exercises bitwise operators.
-#[test]
-fn curvy_witness_reproduces_the_pending_assignment() {
-    assert_evaluators_agree(
-        Circuit::pending(),
-        &pending_input(),
-        "pending-5-30.graph.bin",
-        "3cc81fe0a084c0b11bb627c564f20f1f86d5368ffa19d1d558b03c0414b5f69b",
-    );
-}
-
 /// The slot-allocated evaluator must match the standard evaluator.
 #[test]
 fn sage_reproduces_every_bundled_profile() {
-    // Profiles with input builders in this crate.
-    for (circuit, input) in [
-        (Circuit::pix_aggregation(), pix_aggregation_input()),
-        (Circuit::pix_withdrawal(), pix_withdrawal_input()),
-        (Circuit::pending(), pending_input()),
-    ] {
+    let mut profiles = bound_spend_inputs()
+        .into_iter()
+        .map(|(circuit, input, _binding)| (circuit, input))
+        .collect::<Vec<_>>();
+    profiles.push((
+        Circuit::pending(),
+        pending_commitment().circuit_input_json(),
+    ));
+
+    for (circuit, input) in profiles {
         let key = circuit.key;
         let path = circuit
             .graph_path()
@@ -277,33 +405,4 @@ fn sage_reproduces_every_bundled_profile() {
             graph.slot_count()
         );
     }
-}
-
-/// An optional SIGNET v2 artifact must match the bundled graph.
-#[test]
-fn curvy_witness_v2_reproduces_the_pending_assignment() {
-    let (Ok(path), Ok(expected_sha)) = (
-        std::env::var("CURVY_PENDING_SIGNET_V2"),
-        std::env::var("CURVY_PENDING_SIGNET_V2_SHA256"),
-    ) else {
-        eprintln!("skipping: set CURVY_PENDING_SIGNET_V2 and CURVY_PENDING_SIGNET_V2_SHA256");
-        return;
-    };
-
-    let input = pending_input();
-    let reference = iden3_assignment(
-        "pending-5-30.graph.bin",
-        "3cc81fe0a084c0b11bb627c564f20f1f86d5368ffa19d1d558b03c0414b5f69b",
-        &input,
-    );
-    let bytes = std::fs::read(&path).expect("read SIGNET v2 graph");
-    let candidate = curvy_witness::WitnessGraph::from_bytes(&bytes, &expected_sha)
-        .expect("parse SIGNET v2 graph")
-        .calculate_json(&input)
-        .expect("SIGNET v2 witness");
-
-    assert_eq!(
-        candidate, reference,
-        "v2 disagrees with the iden3 reference"
-    );
 }

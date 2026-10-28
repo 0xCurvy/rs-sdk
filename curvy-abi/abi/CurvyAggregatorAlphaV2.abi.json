@@ -44,22 +44,70 @@
   {
     "inputs": [
       {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expiresAt",
+        "type": "uint64"
+      }
+    ],
+    "name": "CircuitVersionExpired",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      }
+    ],
+    "name": "CircuitVersionIsLatest",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      }
+    ],
+    "name": "CircuitVersionNotReleased",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "CommitmentFeeRootGracePeriodTooLong",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "target",
         "type": "address"
       }
     ],
     "name": "ConfigAddressHasNoCode",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "CurrentNoteTreeRootMismatch",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "CurrentNullifierTreeRootMismatch",
     "type": "error"
   },
   {
@@ -110,11 +158,6 @@
   },
   {
     "inputs": [],
-    "name": "InvalidInputHash",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "InvalidNotesRoot",
     "type": "error"
   },
@@ -136,6 +179,11 @@
   {
     "inputs": [],
     "name": "NetAmountNonPositive",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NoCircuitVerifiers",
     "type": "error"
   },
   {
@@ -223,11 +271,6 @@
   },
   {
     "inputs": [],
-    "name": "UnderfundedReimbursement",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "UnknownGasFeeRoot",
     "type": "error"
   },
@@ -238,18 +281,162 @@
   },
   {
     "inputs": [],
-    "name": "UnsupportedAggregationConfig",
+    "name": "VerifierExpiryRequired",
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "UnsupportedWithdrawalConfig",
+    "inputs": [
+      {
+        "internalType": "uint64",
+        "name": "expiresAt",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "latest",
+        "type": "uint64"
+      }
+    ],
+    "name": "VerifierGracePeriodTooLong",
     "type": "error"
   },
   {
     "inputs": [],
     "name": "WithdrawalVerifierNotConfigured",
     "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "WordOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroWithdrawal",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      },
+      {
+        "components": [
+          {
+            "internalType": "enum ICurvyAggregatorAlpha.CircuitKind",
+            "name": "kind",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint256",
+            "name": "inputs",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "outputs",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "verifier",
+            "type": "address"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct ICurvyAggregatorAlpha.CircuitVerifier[]",
+        "name": "verifiers",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "CircuitVerifiersSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "expiresAt",
+        "type": "uint64"
+      }
+    ],
+    "name": "CircuitVersionExpirySet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      }
+    ],
+    "name": "CircuitVersionReleased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "gracePeriod",
+        "type": "uint64"
+      }
+    ],
+    "name": "CommitmentFeeRootGracePeriodUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "root",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "validUntil",
+        "type": "uint64"
+      }
+    ],
+    "name": "CommitmentGasFeeRootSuperseded",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -394,6 +581,19 @@
     "anonymous": false,
     "inputs": [
       {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "root",
+        "type": "uint256"
+      }
+    ],
+    "name": "PreviousCommitmentFeeRootExpired",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
         "indexed": true,
         "internalType": "bytes32",
         "name": "role",
@@ -506,6 +706,32 @@
   },
   {
     "inputs": [],
+    "name": "MAX_COMMITMENT_FEE_ROOT_GRACE_PERIOD",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_VERIFIER_GRACE_PERIOD",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "OPERATOR_ROLE",
     "outputs": [
       {
@@ -533,17 +759,27 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "configKey",
-        "type": "bytes32"
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
       }
     ],
-    "name": "aggregationVerifiersByConfig",
+    "name": "circuitVersionStatus",
     "outputs": [
       {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitVersionStatus",
+        "name": "status",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expiresAt",
+        "type": "uint64"
       }
     ],
     "stateMutability": "view",
@@ -557,6 +793,23 @@
         "type": "uint256"
       },
       {
+        "components": [
+          {
+            "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+            "name": "family",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint64",
+            "name": "version",
+            "type": "uint64"
+          }
+        ],
+        "internalType": "struct ICurvyAggregatorAlpha.CircuitRef",
+        "name": "circuit",
+        "type": "tuple"
+      },
+      {
         "internalType": "uint256[]",
         "name": "noteIds",
         "type": "uint256[]"
@@ -564,6 +817,11 @@
       {
         "internalType": "uint256",
         "name": "newNotesRoot",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "commitment",
         "type": "uint256"
       },
       {
@@ -595,6 +853,19 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "commitmentFeeRootGracePeriod",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
       }
     ],
     "stateMutability": "view",
@@ -719,6 +990,13 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "expirePreviousCommitmentFeeRoot",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -732,30 +1010,6 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "maxInputs",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "maxOutputs",
-        "type": "uint256"
-      }
-    ],
-    "name": "getAggregationVerifier",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -816,25 +1070,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "batchSize",
-        "type": "uint256"
-      }
-    ],
-    "name": "getPendingNotesCommitmentVerifier",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "bytes32",
         "name": "role",
         "type": "bytes32"
@@ -854,12 +1089,32 @@
   {
     "inputs": [
       {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      },
+      {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitKind",
+        "name": "kind",
+        "type": "uint8"
+      },
+      {
         "internalType": "uint256",
-        "name": "maxInputs",
+        "name": "inputs",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "outputs",
         "type": "uint256"
       }
     ],
-    "name": "getWithdrawalVerifier",
+    "name": "getVerifier",
     "outputs": [
       {
         "internalType": "address",
@@ -929,6 +1184,44 @@
     "inputs": [
       {
         "internalType": "uint256",
+        "name": "root",
+        "type": "uint256"
+      }
+    ],
+    "name": "isCommitmentFeeRootAccepted",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      }
+    ],
+    "name": "latestCircuitVersion",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
         "name": "noteId",
         "type": "uint256"
       }
@@ -966,25 +1259,6 @@
   {
     "inputs": [],
     "name": "owner",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "configKey",
-        "type": "bytes32"
-      }
-    ],
-    "name": "pendingNotesCommitmentVerifiersByConfig",
     "outputs": [
       {
         "internalType": "address",
@@ -1050,6 +1324,32 @@
   },
   {
     "inputs": [],
+    "name": "previousCommitmentFeeRoot",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "previousCommitmentFeeRootValidUntil",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "protocolFeePerThousand",
     "outputs": [
       {
@@ -1072,6 +1372,25 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      }
+    ],
+    "name": "releaseCircuitVersion",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1120,22 +1439,75 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "maxInputs",
-        "type": "uint256"
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
       },
       {
-        "internalType": "uint256",
-        "name": "maxOutputs",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "verifier",
-        "type": "address"
+        "components": [
+          {
+            "internalType": "enum ICurvyAggregatorAlpha.CircuitKind",
+            "name": "kind",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint256",
+            "name": "inputs",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "outputs",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "verifier",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ICurvyAggregatorAlpha.CircuitVerifier[]",
+        "name": "verifiers",
+        "type": "tuple[]"
       }
     ],
-    "name": "setAggregationVerifier",
+    "name": "setCircuitVerifiers",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expiresAt",
+        "type": "uint64"
+      }
+    ],
+    "name": "setCircuitVersionExpiry",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint64",
+        "name": "gracePeriod",
+        "type": "uint64"
+      }
+    ],
+    "name": "setCommitmentFeeRootGracePeriod",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1188,24 +1560,6 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "batchSize",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "verifier",
-        "type": "address"
-      }
-    ],
-    "name": "setPendingNotesCommitmentVerifier",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
         "name": "_protocolFeePerThousand",
         "type": "uint256"
       }
@@ -1218,19 +1572,20 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "maxInputs",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "verifier",
-        "type": "address"
+        "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+        "name": "family",
+        "type": "uint8"
       }
     ],
-    "name": "setWithdrawalVerifier",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "name": "stagedCircuitCount",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1246,36 +1601,30 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint256[2]",
-        "name": "proof_a",
-        "type": "uint256[2]"
-      },
-      {
-        "internalType": "uint256[2][2]",
-        "name": "proof_b",
-        "type": "uint256[2][2]"
-      },
-      {
-        "internalType": "uint256[2]",
-        "name": "proof_c",
-        "type": "uint256[2]"
+        "components": [
+          {
+            "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+            "name": "family",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint64",
+            "name": "version",
+            "type": "uint64"
+          }
+        ],
+        "internalType": "struct ICurvyAggregatorAlpha.CircuitRef",
+        "name": "circuit",
+        "type": "tuple"
       },
       {
         "internalType": "uint256[]",
-        "name": "publicSignals",
+        "name": "words",
         "type": "uint256[]"
-      }
-    ],
-    "name": "submitAggregationRequest",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
+      },
       {
         "internalType": "uint256",
-        "name": "maxInputs",
+        "name": "commitment",
         "type": "uint256"
       },
       {
@@ -1292,11 +1641,61 @@
         "internalType": "uint256[2]",
         "name": "proof_c",
         "type": "uint256[2]"
+      }
+    ],
+    "name": "submitAggregationRequest",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "maxInputs",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "enum ICurvyAggregatorAlpha.CircuitFamily",
+            "name": "family",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint64",
+            "name": "version",
+            "type": "uint64"
+          }
+        ],
+        "internalType": "struct ICurvyAggregatorAlpha.CircuitRef",
+        "name": "circuit",
+        "type": "tuple"
       },
       {
         "internalType": "uint256[]",
-        "name": "publicSignals",
+        "name": "words",
         "type": "uint256[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "commitment",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256[2]",
+        "name": "proof_a",
+        "type": "uint256[2]"
+      },
+      {
+        "internalType": "uint256[2][2]",
+        "name": "proof_b",
+        "type": "uint256[2][2]"
+      },
+      {
+        "internalType": "uint256[2]",
+        "name": "proof_c",
+        "type": "uint256[2]"
       }
     ],
     "name": "submitWithdrawalRequest",
@@ -1399,25 +1798,6 @@
         "internalType": "bool",
         "name": "",
         "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "configKey",
-        "type": "bytes32"
-      }
-    ],
-    "name": "withdrawalVerifiersByConfig",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
       }
     ],
     "stateMutability": "view",

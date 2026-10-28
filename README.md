@@ -5,7 +5,7 @@ Native Rust SDK for Curvy, driven through Blokli.
 It covers four operations end to end:
 
 1. **deposit** through a deterministic shield portal;
-2. **commit** pending notes into the global depth-30 tree;
+2. **commit** up to 256 pending notes per proof into the global depth-30 tree;
 3. **aggregate** up to two input notes into nine regular outputs plus one fee output;
 4. **withdraw** up to ten notes held by unrelated BabyJubJub scalars in a single proof.
 
@@ -20,16 +20,50 @@ allocation identifiers.
 
 | what | where | why |
 |---|---|---|
-| Rust 1.94 | `rust-toolchain.toml` | pinned; rustup installs it on first build |
+| Rust 1.97 | `rust-toolchain.toml` | pinned; rustup installs it on first build |
 | A C compiler | `cc` on PATH | native cryptography dependencies need it |
-| Proving keys | `zk-keys/v2` in this repo | 278 MB, gitignored; fetched and digest-checked automatically by any recipe that needs them |
+| Proving keys | `zk-keys/v2` in this repo | 239 MB, gitignored; fetched and digest-checked automatically by any recipe that needs them |
 | A Curvy-enabled Blokli + Anvil stack | `BLOKLI_URL` | the only backend this SDK talks to |
 
 The cryptography comes from the `curvy-core`, `curvy-prover` and `curvy-witness`
-crates, pinned to `=0.1.1`.
+crates, pinned to `=0.1.4`.
 
-The proving keys are the final output of the Gnosis trusted-setup ceremony: the
-keys the Gnosis PIX aggregator's verifiers are set up with.
+## Calldata-bound proofs
+
+Every circuit is bound to calldata. The circuit takes the values the aggregator is
+sent, its words, as private inputs and commits to them, and its only public signals
+are `[commitment, y, x]` (`curvy_core::calldata`). The aggregator is sent the words and
+the commitment with the proof, and derives `x` and `y` from them itself.
+
+- `commitPendingNotes(batchSize, circuit, noteIds, newNotesRoot, commitment, proof)`:
+  one batch-256 circuit serves every commit. Only the real note ids are posted; the
+  circuit pads its batch with zeros, which the contract hashes itself.
+  `CurvyClient::commit` takes up to `MAX_COMMIT_NOTES` (256).
+- `submitAggregationRequest(maxInputs, maxOutputs, circuit, words, commitment, proof)`
+  and `submitWithdrawalRequest(maxInputs, circuit, words, commitment, proof)`.
+
+`PixAggregationRequest` and `PixWithdrawalRequest` carry the words in `public_signals`,
+the relayer payload's field for them, and the commitment in `commitment`.
+
+## Circuit versions
+
+Circuits are grouped into families, `Core` and `Pix`, and a family's circuits are released
+together under a version number. Every submission names the family version its proof was
+made for, `circuit` above, and the aggregator checks the proof with that version's
+verifier. It refuses a version it has not released (`CircuitVersionNotReleased`) or whose
+expiry has passed (`CircuitVersionExpired`).
+
+- The PIX aggregation and withdrawal name `Pix` version 1, and so does the relayer
+  payload, as `circuitFamily: "pix"` and `circuitVersion: 1`. `PixAggregationRequest`
+  and `PixWithdrawalRequest` carry it as `circuit`, and the request key covers it.
+- The single aggregation and withdrawal name `Core` version 1, which Gnosis does not
+  release.
+- `CurvyClient::commit` takes the family the aggregator released the pending-notes
+  circuit under: `Pix` on Gnosis, `Core` on the other chains.
+
+`latestCircuitVersion(family)` returns the newest version an aggregator has released, and
+reverts on an aggregator without circuit versions. The call is in
+`curvy_abi::bindings::aggregator`.
 
 ## Getting a run out of it
 
@@ -44,7 +78,9 @@ Proving keys are fetched on demand into `zk-keys/v2` inside the repo, and `just`
 `CURVY_ZK_KEYS_DIR` there, so there is no path to configure. Driving cargo directly still
 works, and then `CURVY_ZK_KEYS_DIR` is yours to set.
 
-The stack must deploy verifier profiles `(2,9)` and `(10)`. Nine phases exercise
+The stack must deploy the versioned aggregator and release `Pix` version 1 with verifier
+profiles `(2,9)`, `(10)` and pending batch `256`, generated from the keys this release
+pins; an aggregator without that release refuses every submission. Nine phases exercise
 deposit, two aggregation fan-outs, a ten-owner withdrawal, commitment, and indexed
 nullifier verification. Each prints as it completes, and the summary lists every
 transaction with its label, backend and hash.
@@ -164,7 +200,7 @@ checkout, and copies the graphs from `artifacts/signet` alongside.
 Nix consumers get the same directory from this repository's flake, pinned to a tag:
 
 ```bash
-nix build github:0xCurvy/rs-sdk/v0.1.1#curvy-zk-artifacts
+nix build github:0xCurvy/rs-sdk/v0.2.0#curvy-zk-artifacts
 CURVY_ZK_KEYS_DIR=$PWD/result
 ```
 
@@ -179,13 +215,14 @@ whenever `CURVY_ZK_KEYS_DIR` is unset at run time. Set it to the package's store
 a Nix build and the binary needs no variable at all; the store path in the binary also
 makes the artifacts part of its closure.
 
-The graphs for pending `(5,30)`, aggregation `(2,9,30,6)`, withdrawal `(10,30)`, and two
-compatibility profiles are checked in under `artifacts/signet`: `SIGNET01` version-1
-bodies inside zstd frames, 9.5 MB in total, readable by a stock `curvy-witness` with no
+The graphs for pending `(256,30)`, PIX aggregation `(2,9,30,6)`, PIX withdrawal `(10,30)`,
+single aggregation `(2,3,30,6)` and single withdrawal `(2,30)` are checked in under
+`artifacts/signet`: `SIGNET01` version-1
+bodies inside zstd frames, 8.1 MB in total, readable by a stock `curvy-witness` with no
 feature flags. The `bundled-graphs` feature of `curvy-witnesscalc` falls back to that
 directory and exists for this repository's own tests and acceptance flow only.
 
-See [artifacts/README.md](artifacts/README.md) for digests and test fixtures.
+See [artifacts/README.md](artifacts/README.md) for digests and provenance.
 
 ## Local checks
 
@@ -195,16 +232,15 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-The default suite calculates the full aggregation and withdrawal witnesses and checks
-every bundled graph pin. To prove and self-verify every profile against the evaluation
-keys:
+The default suite evaluates every bundled graph, checks that its `[commitment, y, x]`
+binds the words the SDK derives from the same input, and checks every graph pin. To
+prove and self-verify every profile against the ceremony keys:
 
 ```bash
 just test-proving
 ```
 
-`cargo test` needs `libclang` for the graph-equivalence tests. Builds also need a C
-compiler for `secp256k1-sys`.
+Builds need a C compiler for `secp256k1-sys`.
 
 For the acceptance flow on a separate Linux box, see [TESTING.md](TESTING.md).
 Check a machine before proving anything on it:

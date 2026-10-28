@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 /// [`relay_request_key`] need not depend on `curvy-types` directly.
 pub use curvy_types;
 use curvy_types::{
-    CommittedNotesEvent, CommittedNullifiersEvent, Dec, Groth16Proof, OnchainNote,
+    CircuitRef, CommittedNotesEvent, CommittedNullifiersEvent, Dec, Groth16Proof, OnchainNote,
     PendingNotesEvent, RawTx,
 };
 
@@ -161,49 +161,67 @@ pub fn encode_direct_shield(note: &OnchainNote) -> Result<Vec<u8>> {
     Ok(bindings::aggregator::CurvyAggregatorAlphaV2::directShieldCall { note: n }.abi_encode())
 }
 
+fn u256_vec(values: &[Dec]) -> Result<Vec<U256>> {
+    values.iter().map(|s| u256_dec(s)).collect()
+}
+
+fn circuit_arg(circuit: CircuitRef) -> bindings::aggregator::ICurvyAggregatorAlpha::CircuitRef {
+    bindings::aggregator::ICurvyAggregatorAlpha::CircuitRef {
+        family: circuit.family.id(),
+        version: circuit.version,
+    }
+}
+
 /// `CurvyAggregatorAlphaV2.submitAggregationRequest(...)` calldata.
+///
+/// `circuit` is the circuit family version the proof was made for; the aggregator checks the proof
+/// with that version's verifier and refuses a version it has not released or that has expired.
+/// `words` are the values the proof is bound to, in the entry point's order. `commitment` is the
+/// proof's commitment to them; the contract derives the other two public signals, `y` and `x`,
+/// from both.
 pub fn encode_submit_aggregation(
     max_inputs: u64,
     max_outputs: u64,
+    circuit: CircuitRef,
+    words: &[Dec],
+    commitment: &Dec,
     proof: &Groth16Proof,
-    public_signals: &[Dec],
 ) -> Result<Vec<u8>> {
     let (a, b, c) = proof_to_u256(proof)?;
-    let pubs: Vec<U256> = public_signals
-        .iter()
-        .map(|s| u256_dec(s))
-        .collect::<Result<_>>()?;
     Ok(
         bindings::aggregator::CurvyAggregatorAlphaV2::submitAggregationRequestCall {
             maxInputs: U256::from(max_inputs),
             maxOutputs: U256::from(max_outputs),
+            circuit: circuit_arg(circuit),
+            words: u256_vec(words)?,
+            commitment: u256_dec(commitment)?,
             proof_a: a,
             proof_b: b,
             proof_c: c,
-            publicSignals: pubs,
         }
         .abi_encode(),
     )
 }
 
-/// `CurvyAggregatorAlphaV2.submitWithdrawalRequest(...)` calldata.
+/// `CurvyAggregatorAlphaV2.submitWithdrawalRequest(...)` calldata, with `circuit`, `words` and
+/// `commitment` as in [`encode_submit_aggregation`].
 pub fn encode_submit_withdrawal(
     max_inputs: u64,
+    circuit: CircuitRef,
+    words: &[Dec],
+    commitment: &Dec,
     proof: &Groth16Proof,
-    public_signals: &[Dec],
 ) -> Result<Vec<u8>> {
     let (a, b, c) = proof_to_u256(proof)?;
-    let pubs: Vec<U256> = public_signals
-        .iter()
-        .map(|s| u256_dec(s))
-        .collect::<Result<_>>()?;
     Ok(
         bindings::aggregator::CurvyAggregatorAlphaV2::submitWithdrawalRequestCall {
             maxInputs: U256::from(max_inputs),
+            circuit: circuit_arg(circuit),
+            words: u256_vec(words)?,
+            commitment: u256_dec(commitment)?,
             proof_a: a,
             proof_b: b,
             proof_c: c,
-            publicSignals: pubs,
         }
         .abi_encode(),
     )
@@ -216,22 +234,27 @@ pub fn address_to_u160_dec(address: &str) -> Result<String> {
 }
 
 /// `CurvyAggregatorAlphaV2.commitPendingNotes(...)` calldata.
+///
+/// `circuit` is as in [`encode_submit_aggregation`]. `note_ids` are only the notes being
+/// committed, without the zeros that pad the circuit's batch of `batch_size`: the contract hashes
+/// the padding itself. `commitment` is the proof's commitment to
+/// `[paddedNoteIds..., currentRoot, newRoot, currentIndex, newIndex]`.
 pub fn encode_commit_pending_notes(
     batch_size: u64,
+    circuit: CircuitRef,
     note_ids: &[Dec],
     new_notes_root: &Dec,
+    commitment: &Dec,
     proof: &Groth16Proof,
 ) -> Result<Vec<u8>> {
     let (a, b, c) = proof_to_u256(proof)?;
-    let ids: Vec<U256> = note_ids
-        .iter()
-        .map(|s| u256_dec(s))
-        .collect::<Result<_>>()?;
     Ok(
         bindings::aggregator::CurvyAggregatorAlphaV2::commitPendingNotesCall {
             batchSize: U256::from(batch_size),
-            noteIds: ids,
+            circuit: circuit_arg(circuit),
+            noteIds: u256_vec(note_ids)?,
             newNotesRoot: u256_dec(new_notes_root)?,
+            commitment: u256_dec(commitment)?,
             proof_a: a,
             proof_b: b,
             proof_c: c,
@@ -310,9 +333,9 @@ impl RelayAction {
         }
     }
 
-    /// Where this action's nullifiers start in the public signals.
+    /// Where this action's nullifiers start in the words.
     ///
-    /// A withdrawal's signal 0 is the withdrawn amount; an aggregation's nullifiers lead.
+    /// A withdrawal's word 0 is the withdrawn amount; an aggregation's nullifiers lead.
     fn nullifier_offset(self) -> usize {
         match self {
             Self::Aggregation => 0,
@@ -334,18 +357,24 @@ fn keccak_hex(preimage: &[u8]) -> String {
 /// recomputes it and rejects a mismatch — so the encoding is spelled out rather than derived from
 /// a struct that could drift.
 ///
-/// `network_id` is the EVM chain id, not an indexer's internal network row.
+/// `network_id` is the EVM chain id, not an indexer's internal network row. `circuit` is the
+/// circuit family version the proof was made for, which the payload carries as `circuitFamily` and
+/// `circuitVersion`. `public_signals` is the payload's field of that name, which holds the calldata
+/// words. The proof's commitment is not sent, and is not part of the key.
 pub fn relay_request_key(
     action: RelayAction,
     network_id: u64,
     max_inputs: usize,
+    circuit: CircuitRef,
     proof: &Groth16Proof,
     public_signals: &[String],
 ) -> Result<String> {
-    let mut out = Vec::with_capacity(12 * 32 + 32 + public_signals.len() * 32);
+    let mut out = Vec::with_capacity(14 * 32 + 32 + public_signals.len() * 32);
     out.extend_from_slice(&U256::from(action.tag()).to_be_bytes::<32>());
     out.extend_from_slice(&U256::from(network_id).to_be_bytes::<32>());
     out.extend_from_slice(&U256::from(max_inputs).to_be_bytes::<32>());
+    out.extend_from_slice(&U256::from(circuit.family.id()).to_be_bytes::<32>());
+    out.extend_from_slice(&U256::from(circuit.version).to_be_bytes::<32>());
     for value in [&proof.a[0], &proof.a[1]] {
         out.extend_from_slice(&u256_dec(value)?.to_be_bytes::<32>());
     }
@@ -357,8 +386,8 @@ pub fn relay_request_key(
     for value in [&proof.c[0], &proof.c[1]] {
         out.extend_from_slice(&u256_dec(value)?.to_be_bytes::<32>());
     }
-    // Offset to the one dynamic argument: twelve head words.
-    out.extend_from_slice(&U256::from(12 * 32).to_be_bytes::<32>());
+    // Offset to the one dynamic argument: fourteen head words.
+    out.extend_from_slice(&U256::from(14 * 32).to_be_bytes::<32>());
     out.extend_from_slice(&U256::from(public_signals.len()).to_be_bytes::<32>());
     for signal in public_signals {
         out.extend_from_slice(&u256_dec(signal)?.to_be_bytes::<32>());
@@ -370,7 +399,11 @@ pub fn relay_request_key(
 ///
 /// Zeros are the circuit's padding slots and are dropped; duplicates are **not** removed, since
 /// the reference implementation does not remove them either and the key must match.
-pub fn relay_nullifiers(action: RelayAction, max_inputs: usize, public_signals: &[String]) -> Result<Vec<U256>> {
+pub fn relay_nullifiers(
+    action: RelayAction,
+    max_inputs: usize,
+    public_signals: &[String],
+) -> Result<Vec<U256>> {
     let start = action.nullifier_offset();
     let end = start
         .checked_add(max_inputs)
@@ -547,6 +580,16 @@ pub mod topics {
 #[cfg(test)]
 mod relay_key_tests {
     use super::*;
+    use curvy_types::CircuitFamily;
+
+    const CORE_1: CircuitRef = CircuitRef {
+        family: CircuitFamily::Core,
+        version: 1,
+    };
+    const PIX_1: CircuitRef = CircuitRef {
+        family: CircuitFamily::Pix,
+        version: 1,
+    };
 
     /// The fixture from Curvy's own `relayKeys.test.ts`, so the shapes line up with the
     /// reference implementation's.
@@ -562,19 +605,29 @@ mod relay_key_tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
-    // The expected digests below were computed from the wire specification with an independent
-    // keccak implementation, not with this code. They are the contract: the relayer recomputes
-    // both keys and rejects a submission whose keys disagree, so a drift here is a 400 on every
-    // deposit rather than a subtle fault.
+    // The expected digests below come from independent ABI encoders (Foundry's `cast` and viem,
+    // as the relayer uses it), not from this code.
 
     #[test]
     fn request_and_spend_keys_match_the_reference_implementation() -> Result<()> {
         assert_eq!(
-            relay_request_key(RelayAction::Aggregation, 1, 2, &proof(), &signals(&["11", "12", "21"]))?,
-            "0x518309f193b856f1469c5093ca1bddd60b6630fae3edabdbcf6262cdf6f598dd"
+            relay_request_key(
+                RelayAction::Aggregation,
+                1,
+                2,
+                CORE_1,
+                &proof(),
+                &signals(&["11", "12", "21"])
+            )?,
+            "0x2fed373703df894b261ceab4f8bed071f67b925ffdcacede9e0a841709de387f"
         );
         assert_eq!(
-            relay_spend_key(RelayAction::Aggregation, 1, 2, &signals(&["11", "12", "21"]))?,
+            relay_spend_key(
+                RelayAction::Aggregation,
+                1,
+                2,
+                &signals(&["11", "12", "21"])
+            )?,
             "0xd790e59d3d7b988d7061a7ddf659169c980d364c0efb073ba790973f81f272e2"
         );
         Ok(())
@@ -583,11 +636,23 @@ mod relay_key_tests {
     #[test]
     fn a_local_chain_aggregation_matches_the_reference_implementation() -> Result<()> {
         assert_eq!(
-            relay_request_key(RelayAction::Aggregation, 31337, 2, &proof(), &signals(&["9", "10", "11"]))?,
-            "0xc55627f93e241987ebe0692e8dfc9a7572d7b330ff6f905a70e2b9e2af04dc6c"
+            relay_request_key(
+                RelayAction::Aggregation,
+                31337,
+                2,
+                PIX_1,
+                &proof(),
+                &signals(&["9", "10", "11"])
+            )?,
+            "0x057314e8a34a674be35ab50126cb8dbd943210ffecf5d90c332c92c1add7adc9"
         );
         assert_eq!(
-            relay_spend_key(RelayAction::Aggregation, 31337, 2, &signals(&["9", "10", "11"]))?,
+            relay_spend_key(
+                RelayAction::Aggregation,
+                31337,
+                2,
+                &signals(&["9", "10", "11"])
+            )?,
             "0xf2e039982eaf14681fdd5b0a9492f949ea97787c30c2032f7a10586bcf95e211"
         );
         Ok(())
@@ -602,8 +667,8 @@ mod relay_key_tests {
             vec![U256::from(11), U256::from(12)]
         );
         assert_eq!(
-            relay_request_key(RelayAction::Withdrawal, 31337, 3, &proof(), &public)?,
-            "0xbd468f44fa2deb97b28fbbc6aef287795adc46551a57e0613d707078899b1152"
+            relay_request_key(RelayAction::Withdrawal, 31337, 3, PIX_1, &proof(), &public)?,
+            "0x42aa65583bd1496ae26ac8297864c169df3aa1d4be2f12857c2cad1578e3ec40"
         );
         assert_eq!(
             relay_spend_key(RelayAction::Withdrawal, 31337, 3, &public)?,
@@ -620,23 +685,58 @@ mod relay_key_tests {
             ..proof()
         };
         assert_ne!(
-            relay_request_key(RelayAction::Aggregation, 1, 2, &proof(), &public)?,
-            relay_request_key(RelayAction::Aggregation, 1, 2, &reproved, &public)?,
+            relay_request_key(RelayAction::Aggregation, 1, 2, PIX_1, &proof(), &public)?,
+            relay_request_key(RelayAction::Aggregation, 1, 2, PIX_1, &reproved, &public)?,
         );
-        // Same notes spent, so the relayer must still see one in-flight spend and reject the
-        // second with a conflict rather than submitting both.
+        // The same notes under a newer root: a new request, the same spend.
+        let rebuilt = signals(&["11", "12", "22"]);
+        assert_ne!(
+            relay_request_key(RelayAction::Aggregation, 1, 2, PIX_1, &proof(), &public)?,
+            relay_request_key(RelayAction::Aggregation, 1, 2, PIX_1, &proof(), &rebuilt)?,
+        );
         assert_eq!(
             relay_spend_key(RelayAction::Aggregation, 1, 2, &public)?,
-            relay_spend_key(RelayAction::Aggregation, 1, 2, &public)?,
+            relay_spend_key(RelayAction::Aggregation, 1, 2, &rebuilt)?,
         );
+        Ok(())
+    }
+
+    // The family version changes the request key, not the spend key.
+    #[test]
+    fn the_circuit_version_keys_the_request_but_not_the_spend() -> Result<()> {
+        let public = signals(&["11", "12", "21"]);
+        let key =
+            |circuit| relay_request_key(RelayAction::Aggregation, 1, 2, circuit, &proof(), &public);
+        assert_eq!(
+            key(PIX_1)?,
+            "0xa683c771a05ce115785c18035ea20ab3d284ce1047d4d92d0e7e859646ea1bef"
+        );
+        assert_eq!(
+            key(CircuitRef {
+                version: 2,
+                ..CORE_1
+            })?,
+            "0x84a60fdaa15f1bafd9eef4b51ecbd7e355519c28c23a3abaff15f5268b89a1d4"
+        );
+        assert_ne!(key(CORE_1)?, key(PIX_1)?);
         Ok(())
     }
 
     #[test]
     fn nullifier_order_does_not_change_the_spend_key() -> Result<()> {
         assert_eq!(
-            relay_spend_key(RelayAction::Aggregation, 1, 2, &signals(&["11", "12", "21"]))?,
-            relay_spend_key(RelayAction::Aggregation, 1, 2, &signals(&["12", "11", "21"]))?,
+            relay_spend_key(
+                RelayAction::Aggregation,
+                1,
+                2,
+                &signals(&["11", "12", "21"])
+            )?,
+            relay_spend_key(
+                RelayAction::Aggregation,
+                1,
+                2,
+                &signals(&["12", "11", "21"])
+            )?,
         );
         Ok(())
     }
@@ -645,7 +745,10 @@ mod relay_key_tests {
     fn an_all_padding_submission_is_refused() {
         let error = relay_nullifiers(RelayAction::Aggregation, 2, &signals(&["0", "0", "5"]))
             .expect_err("a submission that spends nothing has no spend key");
-        assert!(error.to_string().contains("no non-padding nullifiers"), "{error}");
+        assert!(
+            error.to_string().contains("no non-padding nullifiers"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -654,5 +757,108 @@ mod relay_key_tests {
             .expect_err("the nullifier window runs past the signals");
         let message = error.to_string();
         assert!(message.contains("at least 11"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod bound_entry_point_tests {
+    use super::*;
+    use bindings::aggregator::CurvyAggregatorAlphaV2 as A;
+    use curvy_types::CircuitFamily;
+
+    const PIX_1: CircuitRef = CircuitRef {
+        family: CircuitFamily::Pix,
+        version: 1,
+    };
+
+    fn proof() -> Groth16Proof {
+        Groth16Proof {
+            a: ["1".into(), "2".into()],
+            b: [["3".into(), "4".into()], ["5".into(), "6".into()]],
+            c: ["7".into(), "8".into()],
+        }
+    }
+
+    fn decimals(values: &[u64]) -> Vec<String> {
+        values.iter().map(u64::to_string).collect()
+    }
+
+    fn u256s(values: &[u64]) -> Vec<U256> {
+        values.iter().copied().map(U256::from).collect()
+    }
+
+    // The selectors of the versioned entry points, from their Solidity signatures.
+    fn selector(signature: &str) -> [u8; 4] {
+        alloy::primitives::keccak256(signature.as_bytes())[..4]
+            .try_into()
+            .unwrap()
+    }
+
+    #[test]
+    fn commit_posts_the_note_ids_with_the_commitment() -> Result<()> {
+        let calldata = encode_commit_pending_notes(
+            256,
+            PIX_1,
+            &decimals(&[11, 12]),
+            &"99".into(),
+            &"77".into(),
+            &proof(),
+        )?;
+        assert_eq!(
+            calldata[..4],
+            selector(
+                "commitPendingNotes(uint256,(uint8,uint64),uint256[],uint256,uint256,uint256[2],uint256[2][2],uint256[2])"
+            )
+        );
+        let call = A::commitPendingNotesCall::abi_decode(&calldata)?;
+        assert_eq!(call.batchSize, U256::from(256));
+        assert_eq!((call.circuit.family, call.circuit.version), (1, 1));
+        assert_eq!(call.noteIds, u256s(&[11, 12]));
+        assert_eq!(call.newNotesRoot, U256::from(99));
+        assert_eq!(call.commitment, U256::from(77));
+        // The proof's G2 pairs go through as given.
+        assert_eq!(
+            call.proof_b,
+            [
+                [U256::from(3), U256::from(4)],
+                [U256::from(5), U256::from(6)]
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aggregation_and_withdrawal_post_words_and_commitment() -> Result<()> {
+        let calldata =
+            encode_submit_aggregation(2, 9, PIX_1, &decimals(&[1, 2, 3]), &"44".into(), &proof())?;
+        assert_eq!(
+            calldata[..4],
+            selector(
+                "submitAggregationRequest(uint256,uint256,(uint8,uint64),uint256[],uint256,uint256[2],uint256[2][2],uint256[2])"
+            )
+        );
+        let call = A::submitAggregationRequestCall::abi_decode(&calldata)?;
+        assert_eq!(
+            (call.maxInputs, call.maxOutputs),
+            (U256::from(2), U256::from(9))
+        );
+        assert_eq!((call.circuit.family, call.circuit.version), (1, 1));
+        assert_eq!(call.words, u256s(&[1, 2, 3]));
+        assert_eq!(call.commitment, U256::from(44));
+
+        let calldata =
+            encode_submit_withdrawal(10, PIX_1, &decimals(&[5, 6]), &"55".into(), &proof())?;
+        assert_eq!(
+            calldata[..4],
+            selector(
+                "submitWithdrawalRequest(uint256,(uint8,uint64),uint256[],uint256,uint256[2],uint256[2][2],uint256[2])"
+            )
+        );
+        let call = A::submitWithdrawalRequestCall::abi_decode(&calldata)?;
+        assert_eq!(call.maxInputs, U256::from(10));
+        assert_eq!((call.circuit.family, call.circuit.version), (1, 1));
+        assert_eq!(call.words, u256s(&[5, 6]));
+        assert_eq!(call.commitment, U256::from(55));
+        Ok(())
     }
 }

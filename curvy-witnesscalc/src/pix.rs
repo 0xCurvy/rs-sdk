@@ -82,7 +82,8 @@ fn synthetic_gas_fee_proof(token: &Fr, gas_fee: Fr) -> (Vec<String>, String) {
     )
 }
 
-/// Flat input object for `VerifyPixAggregation(2, 9, 30, 6)`.
+/// Flat input object for `VerifyPixAggregationBound(2, 9, 30, 6)`, without `x`: see
+/// [`crate::Circuit::prove_bound`].
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct PixAggregationWitness {
     #[serde(rename = "inputNotes")]
@@ -190,7 +191,8 @@ pub fn build_pix_aggregation_with_signer(
     })
 }
 
-/// Flat input object for `VerifyPixMultiOwnerWithdrawal(10, 30)`.
+/// Flat input object for `VerifyPixMultiOwnerWithdrawalBound(10, 30)`, without `x`: see
+/// [`crate::Circuit::prove_bound`].
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct PixMultiOwnerWithdrawalWitness {
     #[serde(rename = "inputNotes")]

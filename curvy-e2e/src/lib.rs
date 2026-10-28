@@ -13,7 +13,8 @@ use curvy_core::encoding::from_hex_exact;
 use curvy_core::field::{Fr, fr_to_biguint, fr_to_dec};
 use curvy_core::stealth;
 use curvy_sdk::{
-    Account, CurvyClient, Identity, OwnedNote, Route, ScanRecipient, TxLedger, ViewerIdentity,
+    Account, CircuitFamily, CurvyClient, Identity, OwnedNote, Route, ScanRecipient, TxLedger,
+    ViewerIdentity,
 };
 
 const OPERATOR_PRIVATE_KEY: &str =
@@ -392,10 +393,16 @@ async fn commit_notes(
     operator_private_key: &str,
 ) -> Result<Vec<TxLedger>> {
     let mut ledger = Vec::new();
-    for batch in notes.chunks(5) {
+    for batch in notes.chunks(curvy_sdk::MAX_COMMIT_NOTES) {
         let ids = batch.iter().map(|note| note.note_id()).collect::<Vec<_>>();
+        // The local cluster releases the `Pix` family, as Gnosis does.
         let rows = client
-            .commit(&ids, operator_private_key, Route::Blokli)
+            .commit(
+                &ids,
+                CircuitFamily::Pix,
+                operator_private_key,
+                Route::Blokli,
+            )
             .await?;
         if rows.iter().any(|row| row.backend != "blokli") {
             bail!("pending-note commitment bypassed Blokli");
@@ -493,7 +500,10 @@ pub async fn run() -> Result<E2eReport> {
             // is deployed. That difference is the whole point of this mode, so it is asserted
             // rather than assumed.
             if ledger.len() != 1 {
-                bail!("a direct shield must be a single transaction, got {}", ledger.len());
+                bail!(
+                    "a direct shield must be a single transaction, got {}",
+                    ledger.len()
+                );
             }
             (prepared.note, ledger, "direct")
         }

@@ -3,21 +3,15 @@
 `curvy-abi` consumes these ABI arrays at compile time to generate contract bindings.
 Update them whenever a supported contract interface changes.
 
-## Provenance
+## Source
 
-Extracted with `jq '.abi'` from the Hardhat artifacts published by the `curvy-bindings` crate,
-whose `src/artifacts/*.json` are generated from the contract sources by
-`packages/contracts/evm/rust/generate.sh` in the Curvy monorepo.
+Extracted with `jq '.abi'` from the compiled artifacts of the Curvy contracts.
 
-| | |
-|---|---|
-| `curvy-bindings` | 0.1.0-rc.5 |
-| contract release | 1.0.0 |
-| monorepo revision | `28fa505b64200dfc00a29e475a24779e809def0b` |
-
-Re-vendoring from that crate — rather than hand-editing — is what keeps these in step with the
-deployed contracts. The previous vendored set predated the direct-shield split and still declared
-`autoShield`, which no longer exists on chain.
+The aggregator's `commitPendingNotes`, `submitAggregationRequest` and `submitWithdrawalRequest`
+take the circuit family version the proof was made for, `CircuitRef { family, version }`, and
+their values as calldata words with the proof's `commitment`, and verify the three public
+signals `[commitment, y, x]`. `latestCircuitVersion`, `circuitVersionStatus` and `getVerifier`
+read the released versions.
 
 | file | contract |
 |---|---|

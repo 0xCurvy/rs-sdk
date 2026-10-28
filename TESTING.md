@@ -31,8 +31,8 @@ just e2e
 just e2e 123456
 ```
 
-`curvy-e2e` is excluded from `just test` because it requires live infrastructure.
-The proving tests are ignored by default because they require the evaluation keys.
+`curvy-e2e` is excluded from `just test`; it needs live infrastructure.
+The proving tests are ignored by default; they need the ceremony keys.
 
 ## Proving keys
 
@@ -54,6 +54,9 @@ Cargo commands must set `CURVY_ZK_KEYS_DIR` or the circuit-specific variables.
 The flow requires:
 
 - a Blokli endpoint with Curvy indexing enabled;
+- a deployment of the versioned aggregator with `Pix` version 1 released, its verifiers
+  generated from the pinned ceremony keys: profiles `(2,9)`, `(10)` and pending batch
+  `256`;
 - a deployment address manifest;
 - the authenticated proving keys; and
 - chain ID `31337`.
@@ -149,12 +152,11 @@ and error classification without requiring a chain.
 
 ### Artifact compatibility tests
 
-`curvy-witnesscalc/tests/pix_profiles.rs` compares assignments from the bundled
-SIGNET graphs with pinned iden3 reference graphs. It also checks graph digests,
-optional evaluator modes, and proof verification when keys are available.
-
-The reference evaluator is a development dependency and requires `libclang`.
-Building or running the SDK does not compile it.
+`curvy-witnesscalc/tests/pix_profiles.rs` evaluates every bundled SIGNET graph and
+checks that the assignment's `[commitment, y, x]` is the binding of the calldata words
+`curvy-witnesscalc` derives from the same input. It also checks graph digests, the
+slot-allocated evaluator, and, when keys are available, that every profile proves and
+verifies bound to its words.
 
 ### Live acceptance test
 
@@ -195,7 +197,6 @@ just doc-check
 | `sync` root mismatch | Verify the aggregator address; if Anvil restarted, restart Blokli with a new `/data` directory. |
 | transaction bypassed Blokli | Treat it as an adapter or routing defect. |
 | linker or `cc` failure | Install a C compiler for `secp256k1-sys`. |
-| `libclang` failure | Install libclang for witness compatibility tests. |
 
 `alloy` is configured for plain HTTP. HTTPS and WebSocket endpoints are not
 supported by this workspace build.

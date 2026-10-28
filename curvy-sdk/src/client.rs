@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use curvy_core::eddsa::ScalarSigningKey;
 use curvy_core::field::{Fr, fr_from_biguint, fr_to_biguint, fr_to_dec};
-use curvy_core::imt::Imt;
+use curvy_core::imt::{Imt, IndexedMerkleTree};
 use curvy_core::witness::{
-    KnownOwner, NoteSigner, Proof, SeedNoteSigner, build_aggregation, build_pending_commitment,
-    build_withdrawal_with_signer,
+    KnownOwner, NoteSigner, Proof, SeedNoteSigner, build_aggregation,
+    build_bound_pending_commitment, build_withdrawal_with_signer,
 };
-use curvy_types::{FeeConfig, Groth16Proof, OnchainNote, TxOutcome};
+use curvy_types::{CircuitFamily, CircuitRef, FeeConfig, Groth16Proof, OnchainNote, TxOutcome};
 use curvy_witnesscalc::pix::{build_pix_aggregation_with_signer, build_pix_multi_owner_withdrawal};
 use num_bigint::BigUint;
 use sha3::{Digest, Keccak256};
@@ -31,12 +31,28 @@ use crate::send::{
 };
 
 const TREE_DEPTH: usize = 30;
-const BATCH_SIZE: usize = 5;
-const LEGACY_MAX_INPUTS: u64 = 2;
-const LEGACY_MAX_OUTPUTS: u64 = 3;
+/// The pending-notes circuit's batch. A commit posts only its real note ids, up to this many.
+const BATCH_SIZE: usize = curvy_witnesscalc::pending::BATCH_SIZE;
+/// The most note ids one [`CurvyClient::commit`] takes.
+pub const MAX_COMMIT_NOTES: usize = BATCH_SIZE;
+/// `commitPendingNotes` gas limit: a base plus an amount per posted note id.
+const COMMIT_GAS_BASE: u64 = 450_000;
+const COMMIT_GAS_PER_NOTE: u64 = 8_000;
+const SINGLE_MAX_INPUTS: u64 = 2;
+const SINGLE_MAX_OUTPUTS: u64 = 3;
 const PIX_AGGREGATION_MAX_INPUTS: u64 = 2;
 const PIX_AGGREGATION_MAX_OUTPUTS: u64 = 9;
 const PIX_WITHDRAWAL_MAX_INPUTS: u64 = 10;
+/// The family version the pinned single aggregation and withdrawal keys were released as.
+const CORE_CIRCUIT: CircuitRef = CircuitRef {
+    family: CircuitFamily::Core,
+    version: curvy_witnesscalc::CORE_CIRCUIT_VERSION,
+};
+/// The family version the pinned PIX keys were released as.
+const PIX_CIRCUIT: CircuitRef = CircuitRef {
+    family: CircuitFamily::Pix,
+    version: curvy_witnesscalc::PIX_CIRCUIT_VERSION,
+};
 /// ERC-20 transfers are not uniformly the ~65k operation of a minimal token.
 ///
 /// In particular, wxHOPR performs additional accounting and exhausts the former
@@ -95,6 +111,31 @@ pub enum Route {
     Direct,
 }
 
+/// A proof of a bound circuit in the shape the encoders and the relayer take.
+struct BoundCall {
+    proof: Groth16Proof,
+    /// The calldata words, as decimal strings.
+    words: Vec<String>,
+    commitment: String,
+}
+
+/// Prove `input` with a bound circuit on a blocking worker: the words are derived from the input,
+/// and the proof is refused unless it is bound to them.
+async fn prove_bound(
+    circuit: fn() -> curvy_witnesscalc::Circuit,
+    input: serde_json::Value,
+    what: &'static str,
+) -> Result<BoundCall> {
+    let bound = tokio::task::spawn_blocking(move || circuit().prove_bound(&input))
+        .await
+        .with_context(|| format!("join {what} proof"))??;
+    Ok(BoundCall {
+        proof: curvy_abi::proof_from_snarkjs(&bound.proof_json)?,
+        words: bound.words_dec(),
+        commitment: bound.commitment_dec(),
+    })
+}
+
 /// A per-tx ledger entry.
 #[derive(Clone, Debug)]
 pub struct TxLedger {
@@ -145,14 +186,22 @@ impl PreparedDeposit {
 ///
 /// The output of [`CurvyClient::build_pix_aggregation`], and everything a caller needs either to
 /// submit it themselves ([`CurvyClient::submit_pix_aggregation`]) or to hand it to Curvy's
-/// off-chain relayer, which takes the proof and public signals rather than a signed transaction.
+/// off-chain relayer, which takes the proof and its words rather than a signed transaction.
 ///
 /// The two relayer keys are computed here rather than by the caller because they are derived from
 /// this exact proof: the relayer recomputes both and rejects a mismatch.
 #[derive(Clone, Debug)]
 pub struct PixAggregationRequest {
     pub proof: Groth16Proof,
+    /// The calldata words the proof is bound to, in `submitAggregationRequest`'s order. The relayer
+    /// takes them as its `publicSignals` field.
     pub public_signals: Vec<String>,
+    /// The proof's commitment to [`Self::public_signals`]; the contract takes it with them. The
+    /// proof's own public signals are `[commitment, y, x]`.
+    pub commitment: String,
+    /// The circuit family version the proof was made for, `Pix` and the pinned keys' version. The
+    /// relayer payload carries it as `circuitFamily` and `circuitVersion`.
+    pub circuit: CircuitRef,
     /// The verifier profile's input count — `2` for PIX aggregation, and the `maxInputs` the
     /// relayer payload carries.
     pub max_inputs: usize,
@@ -173,8 +222,10 @@ impl PixAggregationRequest {
         curvy_abi::encode_submit_aggregation(
             PIX_AGGREGATION_MAX_INPUTS,
             PIX_AGGREGATION_MAX_OUTPUTS,
-            &self.proof,
+            self.circuit,
             &self.public_signals,
+            &self.commitment,
+            &self.proof,
         )
     }
 
@@ -206,7 +257,14 @@ impl PixAggregationRequest {
 #[derive(Clone, Debug)]
 pub struct PixWithdrawalRequest {
     pub proof: Groth16Proof,
+    /// The calldata words, as in [`PixAggregationRequest::public_signals`], in
+    /// `submitWithdrawalRequest`'s order.
     pub public_signals: Vec<String>,
+    /// The proof's commitment to [`Self::public_signals`].
+    pub commitment: String,
+    /// The circuit family version the proof was made for, as in
+    /// [`PixAggregationRequest::circuit`].
+    pub circuit: CircuitRef,
     /// The verifier profile's input count — `10` for PIX withdrawal.
     pub max_inputs: usize,
     /// What the destination receives, after the deployment's withdrawal fee and gas.
@@ -222,8 +280,10 @@ impl PixWithdrawalRequest {
     pub fn calldata(&self) -> Result<Vec<u8>> {
         curvy_abi::encode_submit_withdrawal(
             PIX_WITHDRAWAL_MAX_INPUTS,
-            &self.proof,
+            self.circuit,
             &self.public_signals,
+            &self.commitment,
+            &self.proof,
         )
     }
 }
@@ -1073,13 +1133,20 @@ impl CurvyClient {
     // Pending-note commitments.
 
     /// Commit pending note ids into the notes tree.
+    ///
+    /// Takes up to [`MAX_COMMIT_NOTES`] (256) ids, and posts only those ids.
+    ///
+    /// `family` is the family the aggregator released the pending-notes circuit under: `Pix` on
+    /// Gnosis, `Core` on the other chains. An aggregator that has not released it reverts the
+    /// transaction (`CircuitVersionNotReleased`); `latestCircuitVersion(family)` in
+    /// `curvy_abi::bindings::aggregator` reads the version it has released.
     pub async fn commit(
         &self,
         pending_ids: &[Fr],
+        family: CircuitFamily,
         operator_priv: &str,
         route: Route,
     ) -> Result<Vec<TxLedger>> {
-        // The `(5,30)` profile accepts at most five note ids.
         if pending_ids.len() > BATCH_SIZE {
             bail!(
                 "commit takes at most {BATCH_SIZE} note ids per proof, got {}",
@@ -1101,33 +1168,41 @@ impl CurvyClient {
         }
 
         let leaves = self.sync().await?;
-        let tree = Imt::from_leaves(TREE_DEPTH, &leaves);
+        let mut tree = IndexedMerkleTree::from_leaves(TREE_DEPTH, &leaves)
+            .context("rebuild the committed notes tree")?;
+        // Appends the ids to the local tree and binds the words the contract will hash:
+        // [paddedIds..., currentRoot, newRoot, currentIndex, newIndex].
+        let pending = build_bound_pending_commitment(&mut tree, BATCH_SIZE, pending_ids)
+            .context("pending-notes commitment")?;
+        let note_ids = pending.note_ids().iter().map(fr_to_dec).collect::<Vec<_>>();
+        let new_root = fr_to_dec(&pending.new_notes_root);
 
-        let witness = build_pending_commitment(&tree, TREE_DEPTH, BATCH_SIZE, pending_ids);
-        let note_ids = witness.pending_note_ids.clone(); // padded batch (order matters on-chain)
-        let new_root = witness.new_notes_root.clone();
-        let (input_json, _reduced) = curvy_witnesscalc::pending::to_circuit_input(&witness)?;
+        let bound =
+            tokio::task::spawn_blocking(move || curvy_witnesscalc::pending::prove(&pending))
+                .await
+                .context("join prove")??;
+        let proof = curvy_abi::proof_from_snarkjs(&bound.proof_json)?;
 
-        let bundle = tokio::task::spawn_blocking(move || {
-            curvy_witnesscalc::Circuit::pending().prove(&input_json)
-        })
-        .await
-        .context("join prove")??;
-        let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
-
+        let circuit = match family {
+            CircuitFamily::Core => CORE_CIRCUIT,
+            CircuitFamily::Pix => PIX_CIRCUIT,
+        };
         let calldata = curvy_abi::encode_commit_pending_notes(
             BATCH_SIZE as u64,
+            circuit,
             &note_ids,
             &new_root,
+            &bound.commitment_dec(),
             &proof,
         )?;
+        let gas_limit = COMMIT_GAS_BASE + COMMIT_GAS_PER_NOTE * pending_ids.len() as u64;
         let submitted = self
             .submit_call(
                 operator_priv,
                 &self.aggregator,
                 calldata,
                 "0",
-                2_000_000,
+                gas_limit,
                 route,
                 "commit",
             )
@@ -1170,6 +1245,9 @@ impl CurvyClient {
     // Aggregation.
 
     /// Aggregate a committed note into a recipient note, change and a fee note.
+    ///
+    /// Proves the single aggregation `(2,3)` under `Core` version 1. An aggregator that does not
+    /// release the `Core` family, as on Gnosis, reverts the transaction.
     #[allow(clippy::too_many_arguments)]
     pub async fn aggregate(
         &self,
@@ -1195,6 +1273,8 @@ impl CurvyClient {
     }
 
     /// Allocate value to a known BabyJubJub owner.
+    ///
+    /// Proves the single aggregation under `Core` version 1, as [`Self::aggregate`] does.
     #[allow(clippy::too_many_arguments)]
     pub async fn aggregate_to_known_owner(
         &self,
@@ -1317,19 +1397,32 @@ impl CurvyClient {
             fee_pub,
         )
         .context("aggregation witness")?;
-        let input_json = serde_json::to_string(&w)?;
-        let bundle = tokio::task::spawn_blocking(move || {
-            curvy_witnesscalc::Circuit::aggregation().prove(&input_json)
-        })
-        .await
-        .context("join prove")??;
-        let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
+        // The circuit proves the gas fee against the on-chain root: the path and root come from
+        // the live fee table.
+        let mut input = serde_json::to_value(&w)?;
+        let (gas_fee_siblings, gas_fee_root) = real_gas_fee_proof(&fees, &token_dec)?;
+        if gas_fee_root != fees.commitment_fee_root {
+            bail!(
+                "aggregate: rebuilt gas-fee root {gas_fee_root} != on-chain commitmentFeeRoot {}",
+                fees.commitment_fee_root
+            );
+        }
+        input["gasFeeSiblings"] = gas_fee_siblings.into();
+        input["commitPendingNotesGasFeeRoot"] = gas_fee_root.into();
+        let bound = prove_bound(
+            curvy_witnesscalc::Circuit::aggregation,
+            input,
+            "aggregation",
+        )
+        .await?;
 
         let calldata = curvy_abi::encode_submit_aggregation(
-            LEGACY_MAX_INPUTS,
-            LEGACY_MAX_OUTPUTS,
-            &proof,
-            &bundle.public_signals,
+            SINGLE_MAX_INPUTS,
+            SINGLE_MAX_OUTPUTS,
+            CORE_CIRCUIT,
+            &bound.words,
+            &bound.commitment,
+            &bound.proof,
         )?;
         let submitted = self
             .submit_call(
@@ -1365,7 +1458,7 @@ impl CurvyClient {
     /// and a fee note — without submitting it.
     ///
     /// Split from submission so the proof can be handed to Curvy's off-chain relayer, which takes
-    /// proof and public signals rather than a signed transaction. A caller that pays its own gas
+    /// the proof and its words rather than a signed transaction. A caller that pays its own gas
     /// wants [`aggregate_pix_allocations`](Self::aggregate_pix_allocations) instead.
     ///
     /// `relayer` is the gas-reimbursement note a relayer requires: a stealth output addressed to
@@ -1555,31 +1648,33 @@ impl CurvyClient {
         witness.gas_fee_siblings = gas_fee_siblings;
         witness.commit_pending_notes_gas_fee_root = gas_fee_root;
 
-        let input_json = serde_json::to_string(&witness)?;
-        let bundle = tokio::task::spawn_blocking(move || {
-            curvy_witnesscalc::Circuit::pix_aggregation().prove(&input_json)
-        })
-        .await
-        .context("join PIX aggregation proof")??;
-        let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
+        let bound = prove_bound(
+            curvy_witnesscalc::Circuit::pix_aggregation,
+            serde_json::to_value(&witness)?,
+            "PIX aggregation",
+        )
+        .await?;
         let mut emitted_notes = regular_outputs;
         emitted_notes.push(fee);
         let request_key = curvy_abi::relay_request_key(
             curvy_abi::RelayAction::Aggregation,
             self.chain_id,
             PIX_AGGREGATION_MAX_INPUTS as usize,
-            &proof,
-            &bundle.public_signals,
+            PIX_CIRCUIT,
+            &bound.proof,
+            &bound.words,
         )?;
         let spend_key = curvy_abi::relay_spend_key(
             curvy_abi::RelayAction::Aggregation,
             self.chain_id,
             PIX_AGGREGATION_MAX_INPUTS as usize,
-            &bundle.public_signals,
+            &bound.words,
         )?;
         Ok(PixAggregationRequest {
-            proof,
-            public_signals: bundle.public_signals,
+            proof: bound.proof,
+            public_signals: bound.words,
+            commitment: bound.commitment,
+            circuit: PIX_CIRCUIT,
             max_inputs: PIX_AGGREGATION_MAX_INPUTS as usize,
             allocations: allocation_notes,
             change,
@@ -1665,6 +1760,10 @@ impl CurvyClient {
     // Withdrawal.
 
     /// Withdraw a committed note to an EOA.
+    ///
+    /// Proves the single withdrawal `(2)` under `Core` version 1. An aggregator that does not
+    /// release the `Core` family, as on Gnosis, reverts the transaction; there,
+    /// [`Self::build_pix_withdrawal`] withdraws a single note.
     pub async fn withdraw(
         &self,
         spender: &Account,
@@ -1720,17 +1819,18 @@ impl CurvyClient {
             token,
         )
         .context("withdrawal witness")?;
-        let input_json = serde_json::to_string(&w)?;
-        let bundle = tokio::task::spawn_blocking(move || {
-            curvy_witnesscalc::Circuit::withdrawal().prove(&input_json)
-        })
-        .await
-        .context("join prove")??;
-        let proof_oc = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
+        let bound = prove_bound(
+            curvy_witnesscalc::Circuit::withdrawal,
+            serde_json::to_value(&w)?,
+            "withdrawal",
+        )
+        .await?;
         let calldata = curvy_abi::encode_submit_withdrawal(
-            LEGACY_MAX_INPUTS,
-            &proof_oc,
-            &bundle.public_signals,
+            SINGLE_MAX_INPUTS,
+            CORE_CIRCUIT,
+            &bound.words,
+            &bound.commitment,
+            &bound.proof,
         )?;
         let amount = fr_u128(&note.amount)?;
         let gas = parse_withdrawal_gas(&fees, &token_dec)?;
@@ -1763,6 +1863,8 @@ impl CurvyClient {
     }
 
     /// Withdraw a committed note using its BabyJubJub scalar.
+    ///
+    /// Proves the single withdrawal `(2)` under `Core` version 1, as [`Self::withdraw`] does.
     pub async fn withdraw_with_scalar(
         &self,
         signer: &ScalarSigningKey,
@@ -1772,14 +1874,14 @@ impl CurvyClient {
         route: Route,
     ) -> Result<(u128, Vec<TxLedger>)> {
         if note.amount == Fr::from(0u64) {
-            bail!("PIX withdrawal input must have a non-zero amount");
+            bail!("withdrawal input must have a non-zero amount");
         }
         let fees = self.fees.fees().await?;
         let token = note.token;
         let token_dec = fr_to_dec(&token);
         let owner = signer.verifying_key().as_tuple();
         if note.owner_pub != owner {
-            bail!("PIX withdrawal signer does not own the supplied note");
+            bail!("withdrawal signer does not own the supplied note");
         }
 
         let leaves = self.sync().await?;
@@ -1787,7 +1889,7 @@ impl CurvyClient {
         let index = leaves
             .iter()
             .position(|leaf| *leaf == note_id)
-            .context("PIX withdrawal: note not found in committed tree")?;
+            .context("withdrawal: note not found in committed tree")?;
         let tree = Imt::from_leaves(TREE_DEPTH, &leaves);
         let notes_root = tree.root();
         let proof = Proof {
@@ -1816,15 +1918,19 @@ impl CurvyClient {
             destination_field,
             token,
         )?;
-        let input_json = serde_json::to_string(&witness)?;
-        let bundle = tokio::task::spawn_blocking(move || {
-            curvy_witnesscalc::Circuit::withdrawal().prove(&input_json)
-        })
-        .await
-        .context("join PIX withdrawal proof")??;
-        let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
-        let calldata =
-            curvy_abi::encode_submit_withdrawal(LEGACY_MAX_INPUTS, &proof, &bundle.public_signals)?;
+        let bound = prove_bound(
+            curvy_witnesscalc::Circuit::withdrawal,
+            serde_json::to_value(&witness)?,
+            "withdrawal",
+        )
+        .await?;
+        let calldata = curvy_abi::encode_submit_withdrawal(
+            SINGLE_MAX_INPUTS,
+            CORE_CIRCUIT,
+            &bound.words,
+            &bound.commitment,
+            &bound.proof,
+        )?;
         let amount = fr_u128(&note.amount)?;
         let withdrawal_gas = parse_withdrawal_gas(&fees, &token_dec)?;
         let delivered = withdrawal_net(amount, fees.withdrawal_fee_bps, withdrawal_gas)?;
@@ -1836,7 +1942,7 @@ impl CurvyClient {
                 "0",
                 2_000_000,
                 route,
-                "pix-withdraw",
+                "withdraw",
             )
             .await;
         let ledger = match submitted {
@@ -1942,13 +2048,12 @@ impl CurvyClient {
                 token,
             )?
         };
-        let input_json = serde_json::to_string(&witness)?;
-        let bundle = tokio::task::spawn_blocking(move || {
-            curvy_witnesscalc::Circuit::pix_withdrawal().prove(&input_json)
-        })
-        .await
-        .context("join PIX multi-owner withdrawal proof")??;
-        let proof = curvy_abi::proof_from_snarkjs(&bundle.proof_json)?;
+        let bound = prove_bound(
+            curvy_witnesscalc::Circuit::pix_withdrawal,
+            serde_json::to_value(&witness)?,
+            "PIX multi-owner withdrawal",
+        )
+        .await?;
         // Complete fallible calculations before submission.
         let total = spends.iter().try_fold(0u128, |total, (_, note)| {
             total
@@ -1963,18 +2068,21 @@ impl CurvyClient {
             curvy_abi::RelayAction::Withdrawal,
             self.chain_id,
             PIX_WITHDRAWAL_MAX_INPUTS as usize,
-            &proof,
-            &bundle.public_signals,
+            PIX_CIRCUIT,
+            &bound.proof,
+            &bound.words,
         )?;
         let spend_key = curvy_abi::relay_spend_key(
             curvy_abi::RelayAction::Withdrawal,
             self.chain_id,
             PIX_WITHDRAWAL_MAX_INPUTS as usize,
-            &bundle.public_signals,
+            &bound.words,
         )?;
         Ok(PixWithdrawalRequest {
-            proof,
-            public_signals: bundle.public_signals,
+            proof: bound.proof,
+            public_signals: bound.words,
+            commitment: bound.commitment,
+            circuit: PIX_CIRCUIT,
             max_inputs: PIX_WITHDRAWAL_MAX_INPUTS as usize,
             delivered,
             nullifiers: spends.iter().map(|(_, note)| note.nullifier()).collect(),
@@ -2436,7 +2544,12 @@ mod tests {
         let client = probe_client(Arc::new(SubmissionProbe::default()));
         assert!(
             client
-                .commit(&[Fr::from(0u64)], TEST_SIGNER, Route::Direct)
+                .commit(
+                    &[Fr::from(0u64)],
+                    CircuitFamily::Pix,
+                    TEST_SIGNER,
+                    Route::Direct
+                )
                 .await
                 .unwrap_err()
                 .to_string()
@@ -2446,6 +2559,7 @@ mod tests {
             client
                 .commit(
                     &[Fr::from(7u64), Fr::from(7u64)],
+                    CircuitFamily::Pix,
                     TEST_SIGNER,
                     Route::Direct,
                 )
