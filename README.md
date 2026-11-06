@@ -192,6 +192,26 @@ wins, otherwise the file is looked up flat under `CURVY_ZK_KEYS_DIR`. Both are
 authenticated against SHA-256 digests pinned in `curvy-witnesscalc` before decompression,
 decoding, or the unchecked point parser sees them. Wrong or stale files fail closed.
 
+A proving key can also be a compact zkey (`<name>-final.czkey`, from rs-core's
+`compact-zkey` feature): the same key with each curve point stored as its x coordinate,
+about a quarter of the size. It is used when the directory has no `.zkey` of that name, or
+when `CURVY_<CIRCUIT>_ZKEY` points at one; the loader tells the two formats apart by their
+first bytes. A compact zkey is checked against its own pin in `curvy-witnesscalc` before it
+is decoded, and must name the pinned zkey as the one it decodes to.
+
+| key | zkey bytes | compact bytes |
+|---|--:|--:|
+| PIX withdrawal `(10,30)` | 97,342,891 | 27,089,687 |
+| pending `(256,30)` | 65,402,755 | 15,752,401 |
+| PIX aggregation `(2,9,30,6)` | 39,980,468 | 9,621,660 |
+| single aggregation `(2,3,30,6)` | 20,467,024 | 5,460,364 |
+| single withdrawal `(2,30)` | 15,402,640 | 4,398,298 |
+
+Loading a compact zkey costs a square root per curve point: 990 ms single-threaded and
+144 ms on 14 threads for the PIX aggregation key, against 30 ms for its zkey. A host that
+loads keys often can expand each compact zkey once with rs-core's `compact_zkey` example
+(`decode`) and keep the zkey, which matches the zkey pin. Proofs are the same from either.
+
 The artifacts are **not** part of the published crates. They ship with this repository's
 GitHub releases; a consumer downloads the release's graphs and keys into one directory
 and points `CURVY_ZK_KEYS_DIR` at it. `scripts/fetch-keys.sh` does exactly that for this
