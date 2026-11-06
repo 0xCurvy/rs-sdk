@@ -29,8 +29,8 @@ else
   exit 1
 fi
 
-# Read key names and digests from the circuit definitions.
-pins="$(sed -n 's/.*zkey_file: "\([^"]*\)".*/\1/p;s/.*zkey_sha256: "\([^"]*\)".*/\1/p' \
+# Read key names and digests from the circuit definitions, not the test fixtures.
+pins="$(sed -n '/^#\[cfg(test)\]/q;s/.*zkey_file: "\([^"]*\)".*/\1/p;s/.*zkey_sha256: "\([^"]*\)".*/\1/p' \
   curvy-witnesscalc/src/lib.rs | paste - -)"
 if [ -z "$pins" ]; then
   echo "could not read the proving-key pins out of curvy-witnesscalc/src/lib.rs" >&2
@@ -110,7 +110,7 @@ echo "proving keys: $fetched fetched, all pins verified at zk-keys/v2"
 fi
 
 # Witness graphs: copied from the checkout, digest-checked like the keys.
-graph_pins="$(sed -n 's/.*graph_file: "\([^"]*\)".*/\1/p;s/.*graph_sha256: "\([^"]*\)".*/\1/p' \
+graph_pins="$(sed -n '/^#\[cfg(test)\]/q;s/.*graph_file: "\([^"]*\)".*/\1/p;s/.*graph_sha256: "\([^"]*\)".*/\1/p' \
   curvy-witnesscalc/src/lib.rs | paste - -)"
 while IFS=$'\t' read -r name expected; do
   target="$KEYS_DIR/$name"
