@@ -242,6 +242,10 @@ bodies inside zstd frames, 8.1 MB in total, readable by a stock `curvy-witness` 
 feature flags. The `bundled-graphs` feature of `curvy-witnesscalc` falls back to that
 directory and exists for this repository's own tests and acceptance flow only.
 
+The SDK builds `curvy-witness` with `signet-v2`, so it also reads version-2 bodies, which
+rs-core's `signet transcode` writes. A version-2 graph has its own SHA-256 and needs its
+own pin in `curvy-witnesscalc`.
+
 See [artifacts/README.md](artifacts/README.md) for digests and provenance.
 
 ## Local checks

@@ -31,10 +31,12 @@ curvy-sdk = { path = "curvy-sdk", version = "=0.2.0" }
 
 # Exact versions keep artifact evaluation reproducible: the graph and zkey digests
 # pinned in curvy-witnesscalc are only known to hold for these releases. Without
-# `parallel` proving is single-threaded; `compact-zkey` loads compact proving keys.
+# `parallel` proving is single-threaded; `compact-zkey` loads compact proving keys;
+# `signet-v2` reads SIGNET version-2 witness graphs as well as version-1 ones, and
+# brings in neither SAGE nor SPARROW.
 curvy-core = "=0.1.5"
 curvy-prover = { version = "=0.1.5", features = ["parallel", "compact-zkey"] }
-curvy-witness = "=0.1.5"
+curvy-witness = { version = "=0.1.5", features = ["signet-v2"] }
 
 # Field values cross the crate boundary.
 ark-bn254 = { version = "=0.6.0", features = ["std"] }
