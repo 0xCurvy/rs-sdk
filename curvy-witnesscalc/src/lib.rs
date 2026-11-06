@@ -14,6 +14,11 @@
 //! and its Nix flake, not with the crate. Only the `bundled-graphs` feature, meant for this
 //! repository's own tests and acceptance flow, falls back to the graphs checked into the
 //! source tree.
+//!
+//! The proving key may also be a compact zkey (`.czkey`, `curvy_prover::compact_zkey`), about a
+//! quarter of the size, which loads the same key at the cost of a square root per curve point.
+//! It has its own pin, checked before it is decoded, and must name the pinned zkey as the one it
+//! decodes to; [`Circuit::zkey_path`] says where each is looked for.
 
 use anyhow::{Context, Result, bail};
 use ark_bn254::Fr;
@@ -165,6 +170,9 @@ pub struct Circuit {
     zkey_env: &'static str,
     zkey_file: &'static str,
     zkey_sha256: &'static str,
+    /// Pin of the compact zkey that decodes to `zkey_file`. The name keeps it out of the
+    /// `zkey_sha256` pins `scripts/fetch-keys.sh` and `flake.nix` read from this file.
+    compact_sha256: &'static str,
     pub layout: Layout,
     pub num_public: usize,
 }
@@ -208,6 +216,7 @@ impl Circuit {
             zkey_env: "CURVY_WITHDRAWAL_ZKEY",
             zkey_file: "verifySingleWithdrawalBound_2_30-final.zkey",
             zkey_sha256: "b2446d46fc5acf647d7fd82d4a3a8289e568fcd2ff0d3309aa083efbfb29f07b",
+            compact_sha256: "6810520d1de87b6d2d65b5557da55647a72ee749881f0b3fdc54cc5d6776a3ef",
             layout: Layout::Withdrawal {
                 zero_padding_nullifiers: false,
             },
@@ -225,6 +234,7 @@ impl Circuit {
             zkey_env: "CURVY_AGGREGATION_ZKEY",
             zkey_file: "verifySingleAggregationBound_2_3_30-final.zkey",
             zkey_sha256: "a5e8ba68d9abf0d26a5a8ab5d20f47a6d775370333279d30f8a0850334033e00",
+            compact_sha256: "e58af542d1773704f99a7cae8586c5ea32ae3fd4a7f41ea186c856b56bb6e05f",
             layout: Layout::Aggregation,
             num_public: BOUND_PUBLIC_SIGNALS,
         }
@@ -240,6 +250,7 @@ impl Circuit {
             zkey_env: "CURVY_PIX_AGGREGATION_ZKEY",
             zkey_file: "verifyPixAggregationBound_2_9_30-final.zkey",
             zkey_sha256: "a7269ddecf820217aa103d9267e8884f3c7f37a8211f235c9f6c814f5786ed97",
+            compact_sha256: "8ad4202fb95e17ad9c53d56f3f144608d71fb9b5ec571b92a4016fef79aaa945",
             layout: Layout::Aggregation,
             num_public: BOUND_PUBLIC_SIGNALS,
         }
@@ -255,6 +266,7 @@ impl Circuit {
             zkey_env: "CURVY_PIX_WITHDRAWAL_ZKEY",
             zkey_file: "verifyPixMultiOwnerWithdrawalBound_10_30-final.zkey",
             zkey_sha256: "497cbdf95eb6a9b28aee527b710ef34b1edbaa7ad63631fbcdb492218db75b16",
+            compact_sha256: "067c872e7509a928735c82cac905945d6867c1f204c4a54c075bcebc4e068d57",
             layout: Layout::Withdrawal {
                 zero_padding_nullifiers: true,
             },
@@ -272,6 +284,7 @@ impl Circuit {
             zkey_env: "CURVY_PENDING_ZKEY",
             zkey_file: "verifyPendingNotesCommitmentBound_256_30-final.zkey",
             zkey_sha256: "2f9462e2fd7994751212e7aa3c20dc6e284473876b828f31b90ac75d2479533b",
+            compact_sha256: "b04169b7dd08746090665c7ca2f35381705ffd1098daae4c937c1c602e021d3e",
             layout: Layout::PendingCommitment,
             num_public: BOUND_PUBLIC_SIGNALS,
         }
@@ -294,6 +307,26 @@ impl Circuit {
     /// File name of the proving key under [`ARTIFACTS_DIR_ENV`].
     pub fn zkey_file(&self) -> &'static str {
         self.zkey_file
+    }
+
+    /// File name of the compact proving key under [`ARTIFACTS_DIR_ENV`]: the zkey's, with the
+    /// `.czkey` extension.
+    pub fn compact_file(&self) -> String {
+        let stem = self
+            .zkey_file
+            .strip_suffix(".zkey")
+            .unwrap_or(self.zkey_file);
+        format!("{stem}.czkey")
+    }
+
+    /// Pinned digest of the proving key, the ceremony's.
+    pub fn zkey_sha256(&self) -> &'static str {
+        self.zkey_sha256
+    }
+
+    /// Pinned digest of the compact proving key.
+    pub fn compact_sha256(&self) -> &'static str {
+        self.compact_sha256
     }
 
     /// Resolved graph path: the circuit's own variable, else the file under
@@ -331,7 +364,11 @@ impl Circuit {
     pub fn graph_sha256(&self) -> &'static str {
         self.graph_sha256
     }
-    /// Resolved proving-key path, including environment overrides.
+    /// Resolved proving-key path: the circuit's own variable, else [`Self::zkey_file`] under
+    /// [`ARTIFACTS_DIR_ENV`], else [`Self::compact_file`] there when only it exists.
+    ///
+    /// Either path may hold a zkey or a compact zkey. They are told apart by their first bytes,
+    /// and each is checked against its own pin.
     pub fn zkey_path(&self) -> Result<PathBuf> {
         if let Some(path) = std::env::var_os(self.zkey_env) {
             return Ok(PathBuf::from(path));
@@ -342,7 +379,19 @@ impl Circuit {
                 self.key, self.zkey_env
             )
         })?;
-        Ok(root.join(self.zkey_file))
+        Ok(self.zkey_in(&root))
+    }
+
+    /// The proving key under `root`: the zkey, or the compact zkey when only it exists.
+    fn zkey_in(&self, root: &Path) -> PathBuf {
+        let zkey = root.join(self.zkey_file);
+        if !zkey.exists() {
+            let compact = root.join(self.compact_file());
+            if compact.is_file() {
+                return compact;
+            }
+        }
+        zkey
     }
 
     /// Read a pinned artifact and hard-fail on a digest mismatch.
@@ -355,7 +404,12 @@ impl Circuit {
     ) -> Result<Vec<u8>> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("{}: read {what} {} ({hint})", self.key, path.display()))?;
-        let got = sha256_hex(&bytes);
+        self.check_pin(path, &bytes, expected, what)?;
+        Ok(bytes)
+    }
+
+    fn check_pin(&self, path: &Path, bytes: &[u8], expected: &str, what: &str) -> Result<()> {
+        let got = sha256_hex(bytes);
         if got != expected {
             bail!(
                 "{}: {what} sha256 mismatch at {}: got {got}, expected {expected} - wrong/stale artifact",
@@ -363,7 +417,37 @@ impl Circuit {
                 path.display()
             );
         }
-        Ok(bytes)
+        Ok(())
+    }
+
+    /// Read the proving key at `path` and authenticate it: a zkey against the zkey pin, a
+    /// compact zkey against the compact pin, and the compact zkey must name the pinned zkey
+    /// as the one it decodes to. Nothing is decoded.
+    fn read_proving_key(&self, path: &Path) -> Result<ProvingKey> {
+        let bytes = std::fs::read(path).with_context(|| {
+            format!(
+                "{}: read zkey {} (set CURVY_ZK_KEYS_DIR)",
+                self.key,
+                path.display()
+            )
+        })?;
+        if !curvy_prover::compact_zkey::is_compact(&bytes) {
+            self.check_pin(path, &bytes, self.zkey_sha256, "zkey")?;
+            return Ok(ProvingKey::Zkey(bytes));
+        }
+        self.check_pin(path, &bytes, self.compact_sha256, "compact zkey")?;
+        let header = curvy_prover::compact_zkey::describe(bytes.as_slice())
+            .with_context(|| format!("{}: read compact zkey {}", self.key, path.display()))?;
+        let decodes_to = hex::encode(header.zkey_sha256);
+        if decodes_to != self.zkey_sha256 {
+            bail!(
+                "{}: compact zkey {} decodes to zkey {decodes_to}, expected {} - wrong/stale artifact",
+                self.key,
+                path.display(),
+                self.zkey_sha256
+            );
+        }
+        Ok(ProvingKey::Compact(bytes))
     }
 
     /// Verify the graph and proving-key digests.
@@ -374,12 +458,7 @@ impl Circuit {
             "graph",
             self.graph_env,
         )?;
-        self.read_pinned(
-            &self.zkey_path()?,
-            self.zkey_sha256,
-            "zkey",
-            "set CURVY_ZK_KEYS_DIR",
-        )?;
+        self.read_proving_key(&self.zkey_path()?)?;
         Ok(())
     }
 
@@ -403,16 +482,22 @@ impl Circuit {
         })
     }
 
-    /// Load and authenticate the proving key.
+    /// Load and authenticate the proving key, a zkey or a compact zkey.
     pub fn load_prover(&self) -> Result<Prover> {
-        let zkey = self.read_pinned(
-            &self.zkey_path()?,
-            self.zkey_sha256,
-            "zkey",
-            "set CURVY_ZK_KEYS_DIR",
-        )?;
+        self.load_prover_at(&self.zkey_path()?)
+    }
+
+    fn load_prover_at(&self, path: &Path) -> Result<Prover> {
+        let inner = match self.read_proving_key(path)? {
+            ProvingKey::Zkey(bytes) => {
+                curvy_prover::Prover::from_zkey_bytes(&bytes, self.zkey_sha256)?
+            }
+            ProvingKey::Compact(bytes) => {
+                curvy_prover::Prover::from_compact_zkey_bytes(&bytes, self.compact_sha256)?
+            }
+        };
         Ok(Prover {
-            inner: curvy_prover::Prover::from_zkey_bytes(&zkey, self.zkey_sha256)?,
+            inner,
             num_public: self.num_public,
         })
     }
@@ -518,6 +603,12 @@ impl Circuit {
     }
 }
 
+/// An authenticated proving key, in the format it was read in.
+enum ProvingKey {
+    Zkey(Vec<u8>),
+    Compact(Vec<u8>),
+}
+
 /// A pinned prover for one circuit.
 pub struct Prover {
     inner: curvy_prover::Prover,
@@ -547,5 +638,143 @@ impl Prover {
             proof_json: bundle.proof_json,
             public_signals,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ZKEY: &[u8] = include_bytes!("../testdata/multiplier.zkey");
+    const COMPACT: &[u8] = include_bytes!("../testdata/multiplier.czkey");
+    const ZKEY_SHA256: &str = "320819c1761ecd5edc2d0f6978889457ea402e28d984c42b29153d0f7e81b21f";
+    const COMPACT_SHA256: &str = "d3589b5b0ce19a00e99354f8bbc73524263fa110246fe1ae966d8ebcd5e98bc2";
+
+    fn multiplier(zkey_sha256: &'static str, compact_sha256: &'static str) -> Circuit {
+        Circuit {
+            key: "multiplier",
+            label: "multiplier",
+            graph_env: "CURVY_TEST_MULTIPLIER_GRAPH",
+            graph_file: "multiplier.signet",
+            graph_sha256: "",
+            zkey_env: "CURVY_TEST_MULTIPLIER_ZKEY",
+            zkey_file: "multiplier.zkey",
+            zkey_sha256,
+            compact_sha256,
+            layout: Layout::Aggregation,
+            num_public: 1,
+        }
+    }
+
+    /// A fresh directory holding the named fixtures.
+    fn keys_dir(test: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("curvy-witnesscalc-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        dir
+    }
+
+    /// `c <== a * b` with `a = 3`, `b = 11`: the assignment `[1, c, a, b]`.
+    fn prove(prover: &Prover) -> Vec<String> {
+        let assignment = [1u64, 33, 3, 11].map(Fr::from);
+        prover.prove_assignment(&assignment).unwrap().public_signals
+    }
+
+    #[test]
+    fn the_compact_file_is_named_after_the_zkey() {
+        assert_eq!(
+            Circuit::pix_aggregation().compact_file(),
+            "verifyPixAggregationBound_2_9_30-final.czkey"
+        );
+    }
+
+    #[test]
+    fn the_zkey_wins_and_the_compact_zkey_is_the_fallback() {
+        let circuit = multiplier(ZKEY_SHA256, COMPACT_SHA256);
+        let both = keys_dir(
+            "both",
+            &[("multiplier.zkey", ZKEY), ("multiplier.czkey", COMPACT)],
+        );
+        assert_eq!(circuit.zkey_in(&both), both.join("multiplier.zkey"));
+        let compact = keys_dir("compact", &[("multiplier.czkey", COMPACT)]);
+        assert_eq!(circuit.zkey_in(&compact), compact.join("multiplier.czkey"));
+        let neither = keys_dir("neither", &[]);
+        assert_eq!(circuit.zkey_in(&neither), neither.join("multiplier.zkey"));
+    }
+
+    #[test]
+    fn a_zkey_and_its_compact_zkey_prove_alike() {
+        let circuit = multiplier(ZKEY_SHA256, COMPACT_SHA256);
+        let dir = keys_dir(
+            "prove",
+            &[("multiplier.zkey", ZKEY), ("multiplier.czkey", COMPACT)],
+        );
+        let raw = circuit
+            .load_prover_at(&dir.join("multiplier.zkey"))
+            .unwrap();
+        let compact = circuit
+            .load_prover_at(&dir.join("multiplier.czkey"))
+            .unwrap();
+        assert_eq!(
+            raw.inner.verifying_key_digest(),
+            compact.inner.verifying_key_digest()
+        );
+        assert_eq!(prove(&raw), ["33"]);
+        assert_eq!(prove(&compact), ["33"]);
+        // A compact zkey under a name that says zkey is still told apart and pinned as one.
+        let renamed = keys_dir("renamed", &[("multiplier.zkey", COMPACT)]);
+        let loaded = circuit
+            .load_prover_at(&renamed.join("multiplier.zkey"))
+            .unwrap();
+        assert_eq!(prove(&loaded), ["33"]);
+    }
+
+    #[test]
+    fn each_format_is_checked_against_its_own_pin() {
+        let dir = keys_dir(
+            "pins",
+            &[("multiplier.zkey", ZKEY), ("multiplier.czkey", COMPACT)],
+        );
+        let wrong_compact_pin = multiplier(ZKEY_SHA256, ZKEY_SHA256);
+        let error = wrong_compact_pin
+            .load_prover_at(&dir.join("multiplier.czkey"))
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("compact zkey sha256 mismatch"),
+            "{error:#}"
+        );
+        let wrong_zkey_pin = multiplier(COMPACT_SHA256, COMPACT_SHA256);
+        let error = wrong_zkey_pin
+            .load_prover_at(&dir.join("multiplier.zkey"))
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("zkey sha256 mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_compact_zkey_of_another_key_is_refused_before_decoding() {
+        let other_zkey = multiplier(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            COMPACT_SHA256,
+        );
+        let dir = keys_dir("other", &[("multiplier.czkey", COMPACT)]);
+        let error = other_zkey
+            .load_prover_at(&dir.join("multiplier.czkey"))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("decodes to zkey {ZKEY_SHA256}")),
+            "{error:#}"
+        );
     }
 }

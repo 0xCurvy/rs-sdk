@@ -192,6 +192,34 @@ wins, otherwise the file is looked up flat under `CURVY_ZK_KEYS_DIR`. Both are
 authenticated against SHA-256 digests pinned in `curvy-witnesscalc` before decompression,
 decoding, or the unchecked point parser sees them. Wrong or stale files fail closed.
 
+A proving key can also be a compact zkey (`<name>-final.czkey`, from rs-core's
+`compact-zkey` feature): the same key with each curve point stored as its x coordinate,
+about a quarter of the size. It is used when the directory has no `.zkey` of that name, or
+when `CURVY_<CIRCUIT>_ZKEY` points at one; the loader tells the two formats apart by their
+first bytes. A compact zkey is checked against its own pin in `curvy-witnesscalc` before it
+is decoded, and must name the pinned zkey as the one it decodes to.
+
+| key | zkey bytes | compact bytes |
+|---|--:|--:|
+| PIX withdrawal `(10,30)` | 97,342,891 | 27,089,687 |
+| pending `(256,30)` | 65,402,755 | 15,752,401 |
+| PIX aggregation `(2,9,30,6)` | 39,980,468 | 9,621,660 |
+| single aggregation `(2,3,30,6)` | 20,467,024 | 5,460,364 |
+| single withdrawal `(2,30)` | 15,402,640 | 4,398,298 |
+
+Loading a compact zkey costs a square root per curve point: 990 ms single-threaded and
+144 ms on 14 threads for the PIX aggregation key, against 30 ms for its zkey. A host that
+loads keys often can expand each compact zkey once and keep the zkey, which matches the zkey
+pin:
+
+```bash
+cargo run --release -p curvy-witnesscalc --example inflate_zkey -- \
+  <name>-final.czkey <compact-sha256> <name>-final.zkey
+```
+
+It refuses a file that does not match `<compact-sha256>` or does not decode to the zkey its
+header names. Proofs are the same from either key.
+
 The artifacts are **not** part of the published crates. They ship with this repository's
 GitHub releases; a consumer downloads the release's graphs and keys into one directory
 and points `CURVY_ZK_KEYS_DIR` at it. `scripts/fetch-keys.sh` does exactly that for this
@@ -204,10 +232,12 @@ nix build github:0xCurvy/rs-sdk/v0.2.0#curvy-zk-artifacts
 CURVY_ZK_KEYS_DIR=$PWD/result
 ```
 
-The package fetches the zkeys from the release matching the checkout's own version, by
-the digests in `curvy-witnesscalc`, and takes the graphs from `artifacts/signet`. As a
-flake input (`curvy-zk-artifacts.url = "github:0xCurvy/rs-sdk/<tag>"`) a new release is a
-tag change plus `nix flake update curvy-zk-artifacts`.
+The package fetches the compact zkeys from the release matching the checkout's own version,
+by `compact_sha256`, and expands each with the `inflate_zkey` example into its zkey; the
+build fails unless the result matches `zkey_sha256`. It takes the graphs from
+`artifacts/signet`. As a flake input (`curvy-zk-artifacts.url =
+"github:0xCurvy/rs-sdk/<tag>"`) a new release is a tag change plus `nix flake update
+curvy-zk-artifacts`.
 
 A build that knows where the artifacts will live can compile the location in instead:
 `curvy-witnesscalc` reads `CURVY_ZK_KEYS_DIR_DEFAULT` at build time and falls back to it
@@ -221,6 +251,10 @@ single aggregation `(2,3,30,6)` and single withdrawal `(2,30)` are checked in un
 bodies inside zstd frames, 8.1 MB in total, readable by a stock `curvy-witness` with no
 feature flags. The `bundled-graphs` feature of `curvy-witnesscalc` falls back to that
 directory and exists for this repository's own tests and acceptance flow only.
+
+The SDK builds `curvy-witness` with `signet-v2`, so it also reads version-2 bodies, which
+rs-core's `signet transcode` writes. A version-2 graph has its own SHA-256 and needs its
+own pin in `curvy-witnesscalc`.
 
 See [artifacts/README.md](artifacts/README.md) for digests and provenance.
 

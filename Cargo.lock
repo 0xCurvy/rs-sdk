@@ -1657,9 +1657,9 @@ dependencies = [
 
 [[package]]
 name = "curvy-core"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff91eb5c647d11ab9d4fb4eed504cbf36ee47375ad2a749e47f471b92b57ea38"
+checksum = "22918e9637abb05ea5a6b3e0ab987d1df634e1203af871040eee8362b2823c8d"
 dependencies = [
  "aes",
  "ark-bn254",
@@ -1696,9 +1696,9 @@ dependencies = [
 
 [[package]]
 name = "curvy-prover"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daf81d5040593ef402496b7041af24ff699f8782229a051861bf477933912c17"
+checksum = "605087e328ea8b94487da00bc0592fd5a8fcc140bdb986a4e709ed6d0683084b"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -1713,6 +1713,7 @@ dependencies = [
  "getrandom 0.2.17",
  "num-bigint 0.5.1",
  "rayon",
+ "ruzstd",
  "sha2 0.11.0",
  "thiserror 2.0.19",
  "zeroize",
@@ -1748,9 +1749,9 @@ dependencies = [
 
 [[package]]
 name = "curvy-witness"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "533e8947dbe9f935eb9ad6a5226759463b9b2468a8af50fdbcd59b5fe9ffca84"
+checksum = "57d8139dd8b03c80c0cf0f2e2d1bd6c1788ec4776d49701aa9c729cb6d72dc62"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",
