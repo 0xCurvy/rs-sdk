@@ -209,8 +209,16 @@ is decoded, and must name the pinned zkey as the one it decodes to.
 
 Loading a compact zkey costs a square root per curve point: 990 ms single-threaded and
 144 ms on 14 threads for the PIX aggregation key, against 30 ms for its zkey. A host that
-loads keys often can expand each compact zkey once with rs-core's `compact_zkey` example
-(`decode`) and keep the zkey, which matches the zkey pin. Proofs are the same from either.
+loads keys often can expand each compact zkey once and keep the zkey, which matches the zkey
+pin:
+
+```bash
+cargo run --release -p curvy-witnesscalc --example inflate_zkey -- \
+  <name>-final.czkey <compact-sha256> <name>-final.zkey
+```
+
+It refuses a file that does not match `<compact-sha256>` or does not decode to the zkey its
+header names. Proofs are the same from either key.
 
 The artifacts are **not** part of the published crates. They ship with this repository's
 GitHub releases; a consumer downloads the release's graphs and keys into one directory
@@ -224,10 +232,12 @@ nix build github:0xCurvy/rs-sdk/v0.2.0#curvy-zk-artifacts
 CURVY_ZK_KEYS_DIR=$PWD/result
 ```
 
-The package fetches the zkeys from the release matching the checkout's own version, by
-the digests in `curvy-witnesscalc`, and takes the graphs from `artifacts/signet`. As a
-flake input (`curvy-zk-artifacts.url = "github:0xCurvy/rs-sdk/<tag>"`) a new release is a
-tag change plus `nix flake update curvy-zk-artifacts`.
+The package fetches the compact zkeys from the release matching the checkout's own version,
+by `compact_sha256`, and expands each with the `inflate_zkey` example into its zkey; the
+build fails unless the result matches `zkey_sha256`. It takes the graphs from
+`artifacts/signet`. As a flake input (`curvy-zk-artifacts.url =
+"github:0xCurvy/rs-sdk/<tag>"`) a new release is a tag change plus `nix flake update
+curvy-zk-artifacts`.
 
 A build that knows where the artifacts will live can compile the location in instead:
 `curvy-witnesscalc` reads `CURVY_ZK_KEYS_DIR_DEFAULT` at build time and falls back to it
