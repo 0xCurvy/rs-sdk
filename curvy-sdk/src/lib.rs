@@ -9,7 +9,7 @@ pub mod send;
 
 pub use account::{Account, Identity, OwnedNote, ScanRecipient, Viewer, ViewerIdentity};
 pub use client::{
-    AmbiguousPixAggregation, AmbiguousSubmission, CurvyClient, MAX_COMMIT_NOTES,
+    AmbiguousPixAggregation, AmbiguousSubmission, CurvyClient, LandedShield, MAX_COMMIT_NOTES,
     PixAggregationRequest, PixAggregationResult, PixWithdrawalRequest, PreparedDeposit,
     PreparedDirectShield, Route, TxLedger, ambiguous_pix_aggregation, ambiguous_submission,
 };
