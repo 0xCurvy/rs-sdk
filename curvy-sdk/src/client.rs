@@ -70,6 +70,21 @@ fn parse_gas_fee(fees: &FeeConfig, token_dec: &str) -> Result<u128> {
         .with_context(|| format!("parse pendingNoteCommitment gas fee for token {token_dec}"))
 }
 
+/// The per-token `portalDeployment` gas fee. Tokens absent from the table are `0`.
+fn parse_portal_deployment_fee(fees: &FeeConfig, token_dec: &str) -> Result<u128> {
+    Ok(fees
+        .per_token_gas_fees
+        .iter()
+        .find(|fees| fees.token_id == token_dec)
+        .map(|fees| {
+            fees.portal_deployment
+                .parse::<u128>()
+                .with_context(|| format!("parse portalDeployment gas fee for token {token_dec}"))
+        })
+        .transpose()?
+        .unwrap_or(0))
+}
+
 /// The per-token `withdrawal` gas fee that reimburses the relayer.
 fn parse_withdrawal_gas(fees: &FeeConfig, token_dec: &str) -> Result<u128> {
     Ok(fees
@@ -147,6 +162,9 @@ pub struct TxLedger {
 /// A prepared shield deposit. Persist it before funding the portal.
 #[derive(Clone, Debug)]
 pub struct PreparedDeposit {
+    /// The note with the **net** amount the vault's fees gave when it was prepared. The vault
+    /// charges the fees in force when the shield executes, so a fee update in between commits this
+    /// note with another amount and id. [`CurvyClient::landed_shield_notes`] finds what landed.
     pub note: OwnedNote,
     pub onchain_note: OnchainNote,
     pub portal_address: String,
@@ -293,11 +311,12 @@ impl PixWithdrawalRequest {
 /// The portal-free counterpart to [`PreparedDeposit`]: no portal address and no recovery
 /// address, because nothing is deployed and there is no intermediate contract to recover funds
 /// from. The caller supplies the funds itself, so the only durable risk is submitting twice —
-/// which [`note`](Self::note)'s id makes detectable through
-/// [`note_status`](CurvyClient::note_status).
+/// which [`CurvyClient::landed_shield_notes`] detects.
 #[derive(Clone, Debug)]
 pub struct PreparedDirectShield {
-    /// The note as it will exist in the pool, carrying the **net** amount after vault fees.
+    /// The note with the **net** amount the vault's fees gave when it was prepared. The vault
+    /// charges the fees in force when the shield executes, so a fee update in between commits this
+    /// note with another amount and id. [`CurvyClient::landed_shield_notes`] finds what landed.
     pub note: OwnedNote,
     /// The note as the contract takes it, carrying the **gross** amount. The vault subtracts its
     /// fees and commits `note`'s amount.
@@ -334,6 +353,15 @@ impl PreparedDirectShield {
     pub fn calldata(&self) -> Result<Vec<u8>> {
         curvy_abi::encode_direct_shield(&self.onchain_note)
     }
+}
+
+/// A shield note as the aggregator holds it. See [`CurvyClient::landed_shield_notes`].
+#[derive(Clone, Debug)]
+pub struct LandedShield {
+    /// The prepared note with the amount the vault committed: the note to record and spend.
+    pub note: OwnedNote,
+    /// The aggregator's `noteStatus` for it: `1` pending, `2` committed.
+    pub status: u8,
 }
 
 /// A submission whose final outcome is unknown.
@@ -512,6 +540,136 @@ impl CurvyClient {
             .map_err(anyhow::Error::new)
     }
 
+    /// The notes a shield of `note` committed, whatever net amount the vault settled on.
+    ///
+    /// `note` is a prepared shield note, [`PreparedDirectShield::note`] or
+    /// [`PreparedDeposit::note`], and `gross` and `kind` the shield it was prepared for. Its amount
+    /// is the net the vault's fees gave when it was prepared, but the vault charges the fees in
+    /// force when the shield executes. A gas-fee update in between commits the same note (same
+    /// owner, token, ephemeral key and view tag) with another amount, and so under another id.
+    ///
+    /// Looked for, in order:
+    ///
+    /// 1. the prepared note;
+    /// 2. the note at the net amount the fees in force now give. Both are live reads: they see a
+    ///    shield as soon as it lands;
+    /// 3. the aggregator's `PendingNotes` events from `from_block` up to the index head, matched by
+    ///    the note's ephemeral key, view tag and token, and taken only when the event's note id is
+    ///    this note's at the event's amount. This finds a shield that landed under fees that have
+    ///    since changed again, once the index has reached its block.
+    ///
+    /// `from_block` must be at or before the first block the shield could have landed in. The
+    /// index head read before submitting is; `0` searches the whole history.
+    ///
+    /// Empty when nothing has landed as far as these reads can see. More than one entry means the
+    /// note was shielded more than once, under different fees: each is a note the owner holds.
+    /// An error means the reads failed, not that nothing landed.
+    pub async fn landed_shield_notes(
+        &self,
+        note: &OwnedNote,
+        gross: u128,
+        kind: ShieldKind,
+        from_block: u64,
+    ) -> Result<Vec<LandedShield>> {
+        let mut landed: Vec<LandedShield> = Vec::new();
+        let mut checked: Vec<Fr> = Vec::new();
+
+        let mut candidates = vec![note.clone()];
+        let token_dec = fr_to_dec(&note.token);
+        let fees = self.fees.fees().await?;
+        // Fees that no longer leave a positive net cannot be the ones a landed shield paid.
+        let net_now = shield_net_amount(
+            gross,
+            fees.deposit_fee_bps,
+            parse_portal_deployment_fee(&fees, &token_dec)?,
+            parse_gas_fee(&fees, &token_dec)?,
+            kind,
+        )
+        .ok()
+        .filter(|net| *net > 0);
+        if let Some(net) = net_now {
+            candidates.push(OwnedNote {
+                amount: u128_fr(net),
+                ..note.clone()
+            });
+        }
+        for candidate in candidates {
+            let id = candidate.note_id();
+            if checked.contains(&id) {
+                continue;
+            }
+            checked.push(id);
+            let status = self.note_status(&id).await?;
+            if matches!(status, 1 | 2) {
+                landed.push(LandedShield {
+                    note: candidate,
+                    status,
+                });
+            }
+        }
+
+        let head = self.notes.head_block().await?;
+        if from_block <= head {
+            for event in self.notes.pending_notes(from_block, head).await? {
+                for item in event.notes()? {
+                    // Compared as parsed field elements, whatever decimal form the index uses.
+                    let ephemeral_key = (
+                        parse_fr_decimal(&item.ephemeral_key[0], "pending note ephemeral key x")?,
+                        parse_fr_decimal(&item.ephemeral_key[1], "pending note ephemeral key y")?,
+                    );
+                    if ephemeral_key != note.ephemeral_key
+                        || item.view_tag != u64::from(note.view_tag)
+                        || parse_fr_decimal(&item.token, "pending note token")? != note.token
+                    {
+                        continue;
+                    }
+                    let candidate = OwnedNote {
+                        amount: parse_fr_decimal(&item.amount, "pending note amount")?,
+                        ..note.clone()
+                    };
+                    let id = candidate.note_id();
+                    // The ephemeral key is public: only the note id ties the event to this owner.
+                    if parse_fr_decimal(&item.note_id, "pending note id")? != id
+                        || checked.contains(&id)
+                    {
+                        continue;
+                    }
+                    checked.push(id);
+                    // The event says it landed; the live status says it still stands.
+                    let status = self.note_status(&id).await?;
+                    if matches!(status, 1 | 2) {
+                        landed.push(LandedShield {
+                            note: candidate,
+                            status,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(landed)
+    }
+
+    /// Resolve an ambiguous shield submission: whether any version of `note` landed.
+    async fn wait_for_landed_shield(
+        &self,
+        note: &OwnedNote,
+        gross: u128,
+        kind: ShieldKind,
+        from_block: u64,
+    ) -> bool {
+        for _ in 0..20 {
+            if self
+                .landed_shield_notes(note, gross, kind, from_block)
+                .await
+                .is_ok_and(|landed| !landed.is_empty())
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        false
+    }
+
     /// An EOA's native balance in wei (for end-of-flow asserts).
     pub async fn eth_balance(&self, addr: &str) -> Result<u128> {
         let dec = self
@@ -683,17 +841,7 @@ impl CurvyClient {
         let token_dec = token.to_string();
         let sealed = seal_note(&recipient.identity(), u128_fr(gross), token_fr)?;
         let owner_hash_dec = fr_to_dec(&sealed.owner_hash());
-        let portal_deployment = fees
-            .per_token_gas_fees
-            .iter()
-            .find(|fees| fees.token_id == token_dec)
-            .map(|fees| {
-                fees.portal_deployment.parse::<u128>().with_context(|| {
-                    format!("parse portalDeployment gas fee for token {token_dec}")
-                })
-            })
-            .transpose()?
-            .unwrap_or(0);
+        let portal_deployment = parse_portal_deployment_fee(&fees, &token_dec)?;
         let pending_commit = parse_gas_fee(&fees, &token_dec)?;
         let net = shield_net_amount(
             gross,
@@ -819,6 +967,9 @@ impl CurvyClient {
     ) -> Result<TxLedger> {
         let calldata =
             curvy_abi::encode_deploy_shield_portal(&prepared.onchain_note, &prepared.recovery)?;
+        // Where an ambiguous submission's note would first show up. An unreadable head only
+        // widens the search.
+        let from_block = self.notes.head_block().await.unwrap_or(0);
         let deployed = self
             .submit_call(
                 operator_priv,
@@ -838,7 +989,12 @@ impl CurvyClient {
                 };
                 let recovered = ambiguous.ledger.clone();
                 if self
-                    .wait_for_note_statuses(&[prepared.note.note_id()], &[1, 2])
+                    .wait_for_landed_shield(
+                        &prepared.note,
+                        prepared.gross,
+                        ShieldKind::Portal,
+                        from_block,
+                    )
                     .await
                 {
                     Ok(recovered)
@@ -981,6 +1137,9 @@ impl CurvyClient {
         route: Route,
     ) -> Result<TxLedger> {
         let calldata = prepared.calldata()?;
+        // Where an ambiguous submission's note would first show up. An unreadable head only
+        // widens the search.
+        let from_block = self.notes.head_block().await.unwrap_or(0);
         let submitted = self
             .submit_call(
                 funder_priv,
@@ -1002,7 +1161,12 @@ impl CurvyClient {
                 };
                 let recovered = ambiguous.ledger.clone();
                 if self
-                    .wait_for_note_statuses(&[prepared.note.note_id()], &[1, 2])
+                    .wait_for_landed_shield(
+                        &prepared.note,
+                        prepared.gross,
+                        ShieldKind::Direct,
+                        from_block,
+                    )
                     .await
                 {
                     Ok(recovered)
@@ -2645,5 +2809,406 @@ mod tests {
     fn withdrawal_math_rejects_fees_larger_than_the_note() {
         let error = withdrawal_net(10, 0, 11).unwrap_err();
         assert!(error.to_string().contains("does not cover"));
+    }
+}
+
+#[cfg(test)]
+mod landed_shield_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use curvy_chain_api::{
+        BalanceReader, ChainError, FeeConfigSource, NoteIndexSource, PortalDirectory, RootAnchor,
+        TxSubmitter,
+    };
+    use curvy_types::{FeeConfig, GasFees, PendingNotesEvent, TxOutcome};
+
+    use super::*;
+
+    // A shield of 1e14 gross of token 2 under a 10 bps deposit fee, prepared under a commitment
+    // fee of 5,176,695,732 and executed under 5,574,759,089.
+    const GROSS: u128 = 100_000_000_000_000;
+    const TOKEN: u64 = 2;
+    const PREPARED_FEE: u128 = 5_176_695_732;
+    const LANDED_FEE: u128 = 5_574_759_089;
+    const PREDICTED_NET: u128 = 99_894_823_304_268;
+    const LANDED_NET: u128 = 99_894_425_240_911;
+
+    /// The chain as the lookup reads it: live note statuses and fees, and an index of
+    /// `PendingNotes` events up to its head.
+    #[derive(Default)]
+    struct Chain {
+        fees: Mutex<FeeConfig>,
+        statuses: Mutex<HashMap<String, u8>>,
+        events: Mutex<Vec<PendingNotesEvent>>,
+        head: Mutex<u64>,
+        index_down: Mutex<bool>,
+    }
+
+    impl Chain {
+        fn with_commitment_fee(fee: u128) -> Arc<Self> {
+            let chain = Arc::new(Self::default());
+            chain.set_commitment_fee(fee);
+            chain
+        }
+
+        fn set_commitment_fee(&self, fee: u128) {
+            *self.fees.lock().unwrap() = FeeConfig {
+                deposit_fee_bps: 10,
+                per_token_gas_fees: vec![GasFees {
+                    token_id: TOKEN.to_string(),
+                    portal_deployment: "0".to_string(),
+                    pending_note_commitment: fee.to_string(),
+                    withdrawal: "0".to_string(),
+                }],
+                ..FeeConfig::default()
+            };
+        }
+
+        /// The vault commits `note` at `net` in `block`: the aggregator knows it, and the index
+        /// holds its event.
+        fn land(&self, note: &OwnedNote, net: u128, block: u64, status: u8) {
+            let landed = OwnedNote {
+                amount: u128_fr(net),
+                ..note.clone()
+            };
+            self.statuses
+                .lock()
+                .unwrap()
+                .insert(fr_to_dec(&landed.note_id()), status);
+            self.index(note, &fr_to_dec(&landed.note_id()), net, block);
+            let mut head = self.head.lock().unwrap();
+            *head = (*head).max(block);
+        }
+
+        /// An event carrying `note`'s ephemeral key with an arbitrary id and amount.
+        fn index(&self, note: &OwnedNote, note_id: &str, amount: u128, block: u64) {
+            self.events.lock().unwrap().push(PendingNotesEvent {
+                note_ids: vec![note_id.to_string()],
+                ephemeral_keys: [
+                    vec![fr_to_dec(&note.ephemeral_key.0)],
+                    vec![fr_to_dec(&note.ephemeral_key.1)],
+                ],
+                view_tags: vec![u64::from(note.view_tag)],
+                tokens: vec![fr_to_dec(&note.token)],
+                amounts: vec![amount.to_string()],
+                is_plaintext: vec![true],
+                block_number: block,
+                tx_hash: format!("0x{block:064x}"),
+            });
+        }
+    }
+
+    #[async_trait]
+    impl RootAnchor for Chain {
+        async fn state(&self) -> curvy_chain_api::Result<curvy_types::AggregatorState> {
+            Ok(curvy_types::AggregatorState::default())
+        }
+
+        async fn is_valid_notes_root(&self, _root: &String) -> curvy_chain_api::Result<bool> {
+            Ok(false)
+        }
+
+        async fn note_status(&self, note_id: &String) -> curvy_chain_api::Result<u8> {
+            Ok(*self.statuses.lock().unwrap().get(note_id).unwrap_or(&0))
+        }
+    }
+
+    #[async_trait]
+    impl FeeConfigSource for Chain {
+        async fn fees(&self) -> curvy_chain_api::Result<FeeConfig> {
+            Ok(self.fees.lock().unwrap().clone())
+        }
+    }
+
+    #[async_trait]
+    impl NoteIndexSource for Chain {
+        async fn pending_notes(
+            &self,
+            from_block: u64,
+            to_block: u64,
+        ) -> curvy_chain_api::Result<Vec<PendingNotesEvent>> {
+            if *self.index_down.lock().unwrap() {
+                return Err(ChainError::Transport("index unreachable".to_string()));
+            }
+            Ok(self
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| (from_block..=to_block).contains(&event.block_number))
+                .cloned()
+                .collect())
+        }
+
+        async fn committed_notes(
+            &self,
+            _from_block: u64,
+            _to_block: u64,
+        ) -> curvy_chain_api::Result<Vec<curvy_types::CommittedNotesEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn committed_nullifiers(
+            &self,
+            _from_block: u64,
+            _to_block: u64,
+        ) -> curvy_chain_api::Result<Vec<curvy_types::CommittedNullifiersEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn head_block(&self) -> curvy_chain_api::Result<u64> {
+            Ok(*self.head.lock().unwrap())
+        }
+    }
+
+    #[async_trait]
+    impl TxSubmitter for Chain {
+        async fn submit(&self, _raw: &curvy_types::RawTx) -> curvy_chain_api::Result<TxOutcome> {
+            Err(ChainError::Transport("not used".to_string()))
+        }
+
+        fn backend(&self) -> &'static str {
+            "landed-shield-test"
+        }
+    }
+
+    #[async_trait]
+    impl BalanceReader for Chain {
+        async fn eth_balance(&self, _addr: &String) -> curvy_chain_api::Result<String> {
+            Ok("0".to_string())
+        }
+
+        async fn vault_balance(
+            &self,
+            _owner: &String,
+            _token_id: &String,
+        ) -> curvy_chain_api::Result<String> {
+            Ok("0".to_string())
+        }
+
+        async fn tx_count(&self, _addr: &String) -> curvy_chain_api::Result<u64> {
+            Ok(0)
+        }
+
+        async fn gas_price(&self) -> curvy_chain_api::Result<u128> {
+            Ok(1)
+        }
+
+        async fn chain_id(&self) -> curvy_chain_api::Result<u64> {
+            Ok(100)
+        }
+    }
+
+    #[async_trait]
+    impl PortalDirectory for Chain {
+        async fn entry_portal_address(
+            &self,
+            _owner_hash: &String,
+            _recovery: &String,
+        ) -> curvy_chain_api::Result<String> {
+            Ok("0x0000000000000000000000000000000000000003".to_string())
+        }
+
+        async fn portal_is_registered(&self, _portal: &String) -> curvy_chain_api::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn client(chain: Arc<Chain>) -> CurvyClient {
+        CurvyClient::new(
+            chain.clone(),
+            chain.clone(),
+            chain.clone(),
+            chain.clone(),
+            chain.clone(),
+            chain.clone(),
+            chain,
+            "0x0000000000000000000000000000000000000001".to_string(),
+            "0x0000000000000000000000000000000000000002".to_string(),
+            100,
+        )
+    }
+
+    fn account(byte: u8) -> Account {
+        Account::from_poc_raw_private_key(&hex::encode([byte; 32])).expect("valid account fixture")
+    }
+
+    /// A direct shield prepared under `PREPARED_FEE`.
+    async fn prepared(chain: &Arc<Chain>) -> PreparedDirectShield {
+        let prepared = client(chain.clone())
+            .prepare_direct_shield(&account(7), GROSS, TOKEN)
+            .await
+            .unwrap();
+        assert_eq!(fr_u128(&prepared.note.amount).unwrap(), PREDICTED_NET);
+        prepared
+    }
+
+    async fn landed(
+        chain: &Arc<Chain>,
+        prepared: &PreparedDirectShield,
+        from: u64,
+    ) -> Vec<(u128, u8)> {
+        client(chain.clone())
+            .landed_shield_notes(&prepared.note, prepared.gross, ShieldKind::Direct, from)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|landed| (fr_u128(&landed.note.amount).unwrap(), landed.status))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_shield_that_paid_the_prepared_fees_is_found_by_its_prepared_id() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.land(&prepared.note, PREDICTED_NET, 10, 1);
+        assert_eq!(landed(&chain, &prepared, 0).await, vec![(PREDICTED_NET, 1)]);
+    }
+
+    #[tokio::test]
+    async fn a_fee_update_before_the_shield_is_seen_through_the_fees_in_force_now() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.set_commitment_fee(LANDED_FEE);
+        chain.land(&prepared.note, LANDED_NET, 49_257_897, 2);
+        // The index has not reached the shield yet: the live reads alone find it.
+        *chain.head.lock().unwrap() = 49_257_890;
+        assert_eq!(
+            landed(&chain, &prepared, 49_257_890).await,
+            vec![(LANDED_NET, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shield_under_fees_since_replaced_is_found_in_the_index() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.land(&prepared.note, LANDED_NET, 49_257_897, 2);
+        // The fee has changed again, so neither live candidate matches.
+        chain.set_commitment_fee(6_000_000_000);
+        assert_eq!(
+            landed(&chain, &prepared, 49_257_800).await,
+            vec![(LANDED_NET, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_search_starts_at_from_block() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.land(&prepared.note, LANDED_NET, 49_257_897, 2);
+        chain.set_commitment_fee(6_000_000_000);
+        assert!(landed(&chain, &prepared, 49_257_898).await.is_empty());
+        assert_eq!(landed(&chain, &prepared, 0).await, vec![(LANDED_NET, 2)]);
+    }
+
+    #[tokio::test]
+    async fn an_event_with_this_ephemeral_key_but_another_owner_is_not_this_note() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        // Someone else's note at the same amount, labelled with this note's public ephemeral key.
+        let other = OwnedNote {
+            owner_pub: (Fr::from(1u64), Fr::from(2u64)),
+            amount: u128_fr(LANDED_NET),
+            ..prepared.note.clone()
+        };
+        chain
+            .statuses
+            .lock()
+            .unwrap()
+            .insert(fr_to_dec(&other.note_id()), 2);
+        chain.index(&prepared.note, &fr_to_dec(&other.note_id()), LANDED_NET, 20);
+        *chain.head.lock().unwrap() = 20;
+        assert!(landed(&chain, &prepared, 0).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_indexed_note_the_aggregator_no_longer_knows_is_not_landed() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.land(&prepared.note, LANDED_NET, 30, 2);
+        chain.set_commitment_fee(6_000_000_000);
+        // A reorg dropped the block the index saw.
+        chain.statuses.lock().unwrap().clear();
+        assert!(landed(&chain, &prepared, 0).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_note_shielded_twice_under_different_fees_is_found_twice() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.land(&prepared.note, PREDICTED_NET, 10, 2);
+        chain.land(&prepared.note, LANDED_NET, 20, 1);
+        chain.set_commitment_fee(LANDED_FEE);
+        assert_eq!(
+            landed(&chain, &prepared, 0).await,
+            vec![(PREDICTED_NET, 2), (LANDED_NET, 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_landed_is_empty() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.set_commitment_fee(LANDED_FEE);
+        *chain.head.lock().unwrap() = 100;
+        assert!(landed(&chain, &prepared, 0).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_index_is_an_error_not_an_absence() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        *chain.index_down.lock().unwrap() = true;
+        let result = client(chain.clone())
+            .landed_shield_notes(&prepared.note, prepared.gross, ShieldKind::Direct, 0)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn fees_that_now_exceed_the_gross_only_skip_that_candidate() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let prepared = prepared(&chain).await;
+        chain.land(&prepared.note, LANDED_NET, 40, 2);
+        chain.set_commitment_fee(GROSS * 2);
+        assert_eq!(landed(&chain, &prepared, 0).await, vec![(LANDED_NET, 2)]);
+    }
+
+    #[tokio::test]
+    async fn a_portal_shield_is_priced_with_its_deployment_fee() {
+        let chain = Chain::with_commitment_fee(PREPARED_FEE);
+        let note = client(chain.clone())
+            .prepare_deposit(
+                &account(7),
+                GROSS,
+                TOKEN,
+                "0x0000000000000000000000000000000000000004",
+            )
+            .await
+            .unwrap()
+            .note;
+        let portal_fee = 1_000_000u128;
+        chain.fees.lock().unwrap().per_token_gas_fees[0].portal_deployment = portal_fee.to_string();
+        chain.fees.lock().unwrap().per_token_gas_fees[0].pending_note_commitment =
+            LANDED_FEE.to_string();
+        let net = LANDED_NET - portal_fee;
+        let landed = OwnedNote {
+            amount: u128_fr(net),
+            ..note.clone()
+        };
+        chain
+            .statuses
+            .lock()
+            .unwrap()
+            .insert(fr_to_dec(&landed.note_id()), 1);
+        let found = client(chain.clone())
+            .landed_shield_notes(&note, GROSS, ShieldKind::Portal, 0)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(fr_u128(&found[0].note.amount).unwrap(), net);
     }
 }
