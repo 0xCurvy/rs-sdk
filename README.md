@@ -189,7 +189,8 @@ Both reconcile against the aggregator's on-chain root before anything is spent.
 `CurvyClient` runs each Groth16 proof on a Rayon pool of its own, which it builds on its
 first proof, so a proof never shares the process's global Rayon pool with the host. It also
 keeps each circuit's witness graph and proving key loaded after that circuit's first proof.
-`with_proving` changes either:
+Each client has its own pool and its own loaded circuits; clients in one process share a pool
+only when each is given it with `thread_pool`. `with_proving` changes either:
 
 ```rust
 use curvy_sdk::{CurvyClient, ProvingConfig};

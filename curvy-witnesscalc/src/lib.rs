@@ -511,16 +511,15 @@ impl Circuit {
         })
     }
 
-    /// The resolved artifact paths and the pins they are checked against.
-    fn artifact_key(&self) -> Result<ArtifactKey> {
-        Ok(ArtifactKey {
-            graph: self.graph_path()?,
+    /// The circuit and the pins its artifacts are checked against.
+    fn artifact_key(&self) -> ArtifactKey {
+        ArtifactKey {
+            circuit: self.key,
             graph_sha256: self.graph_sha256,
-            zkey: self.zkey_path()?,
             zkey_sha256: self.zkey_sha256,
             compact_sha256: self.compact_sha256,
             num_public: self.num_public,
-        })
+        }
     }
 
     /// Generate and verify a Groth16 proof, loading and authenticating the graph and the proving
@@ -551,7 +550,7 @@ impl Circuit {
             Ok(LoadedCircuit { calculator, prover })
         };
         let (loaded, artifacts_reused) = match cache {
-            Some(cache) => cache.slots.get_or_load(self.artifact_key()?, load)?,
+            Some(cache) => cache.slots.get_or_load(self.artifact_key(), load)?,
             None => (Arc::new(load()?), false),
         };
 
@@ -679,12 +678,11 @@ struct LoadedCircuit {
     prover: Prover,
 }
 
-/// What a loaded circuit was loaded from: the resolved artifact paths and their pins.
+/// What a loaded circuit is: the circuit and the pins its artifacts authenticated against.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ArtifactKey {
-    graph: PathBuf,
+    circuit: &'static str,
     graph_sha256: &'static str,
-    zkey: PathBuf,
     zkey_sha256: &'static str,
     compact_sha256: &'static str,
     num_public: usize,
@@ -693,9 +691,9 @@ struct ArtifactKey {
 /// Circuits loaded for reuse across proofs.
 ///
 /// A circuit's first proof through the cache loads and authenticates its graph and proving key,
-/// and later proofs reuse them. Entries are keyed by the resolved artifact paths and the pins
-/// they were checked against, so a circuit whose variables now point elsewhere is loaded again.
-/// A load that fails is not kept. Concurrent first proofs of one circuit load it once; proofs of
+/// and later proofs reuse them, wherever its artifacts are found by then. Entries are keyed by
+/// the circuit and its pins: any artifacts that authenticate against those pins hold the same
+/// bytes, so one entry serves every location they are read from. A load that fails is not kept. Concurrent first proofs of one circuit load it once; proofs of
 /// other circuits do not wait for that load.
 ///
 /// Each entry keeps its parsed graph and proving key in memory, about 1.4 times the size of its

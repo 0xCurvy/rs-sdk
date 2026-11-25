@@ -17,6 +17,9 @@ pub const PROVER_THREAD_NAME: &str = "curvy-prover";
 /// The default runs proofs on a pool of [`ProvingConfig::default_threads`] threads that the
 /// client builds on its first proof, and keeps each circuit's witness graph and proving key
 /// loaded after its first proof.
+///
+/// Each client has its own pool and its own loaded circuits: clients in one process share
+/// neither unless they are given the same pool with [`Self::thread_pool`].
 #[derive(Clone)]
 pub struct ProvingConfig {
     threads: Threads,
