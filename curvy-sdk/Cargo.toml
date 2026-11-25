@@ -22,6 +22,7 @@ sha3 = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+rayon = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]

@@ -18,7 +18,9 @@ use curvy_core::witness::{
     build_bound_pending_commitment, build_withdrawal_with_signer,
 };
 use curvy_witnesscalc::pix::{build_pix_aggregation_with_signer, build_pix_multi_owner_withdrawal};
-use curvy_witnesscalc::{BOUND_PUBLIC_SIGNALS, Circuit, WitnessCalculator, pending, words};
+use curvy_witnesscalc::{
+    ArtifactCache, BOUND_PUBLIC_SIGNALS, Circuit, WitnessCalculator, pending, words,
+};
 
 const TREE_DEPTH: usize = 30;
 const GAS_FEE_TREE_DEPTH: usize = 6;
@@ -344,6 +346,36 @@ fn real_zkeys_prove_every_bound_profile() {
             "{key}"
         );
     }
+}
+
+/// A cached circuit is loaded by its first proof and reused by the next, and proves what a
+/// freshly loaded one proves.
+#[test]
+#[ignore = "requires the proving keys via CURVY_ZK_KEYS_DIR"]
+fn a_cached_circuit_loads_once_and_proves_alike() {
+    let cache = ArtifactCache::new();
+    let commitment = pending_commitment();
+    let first = pending::prove_cached(&cache, &commitment).expect("prove pending, loading");
+    assert_eq!(cache.len(), 1);
+    let again = pending::prove_cached(&cache, &commitment).expect("prove pending, reusing");
+    assert_eq!(cache.len(), 1);
+    assert_eq!(first.binding, again.binding);
+    assert_eq!(first.binding, commitment.binding);
+
+    let circuit = Circuit::withdrawal();
+    let input = withdrawal_input();
+    let fresh = circuit.prove_bound(&input).expect("prove withdrawal");
+    for _ in 0..2 {
+        let cached = circuit
+            .prove_bound_cached(&cache, &input)
+            .expect("prove withdrawal from the cache");
+        assert_eq!(cached.binding, fresh.binding);
+        assert_eq!(cached.words, fresh.words);
+    }
+    assert_eq!(cache.len(), 2);
+
+    cache.clear();
+    assert!(cache.is_empty());
 }
 
 /// Every bundled graph must resolve and authenticate.

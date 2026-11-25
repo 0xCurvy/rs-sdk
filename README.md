@@ -184,6 +184,42 @@ events in chain order.
 
 Both reconcile against the aggregator's on-chain root before anything is spent.
 
+## Running proofs
+
+`CurvyClient` runs each Groth16 proof on a Rayon pool of its own, which it builds on its
+first proof, so a proof never shares the process's global Rayon pool with the host. It also
+keeps each circuit's witness graph and proving key loaded after that circuit's first proof.
+`with_proving` changes either:
+
+```rust
+use curvy_sdk::{CurvyClient, ProvingConfig};
+
+let client = CurvyClient::new(/* adapters, addresses, chain id */)
+    .with_proving(ProvingConfig::new().threads(2));
+```
+
+| `ProvingConfig` | default | behaviour |
+|---|---|---|
+| `threads(n)` | half the available CPUs, at least 1 | proofs run on a pool of `n` threads named `curvy-prover-<i>` |
+| `thread_pool(pool)` | | proofs run on `pool`, an `Arc<rayon::ThreadPool>` the host built, for example with a `start_handler` that lowers the threads' priority; `curvy_sdk::rayon` is the Rayon the SDK uses |
+| `global_pool()` | | proofs share the process's global Rayon pool |
+| `keep_loaded(keep)` | `true` | `false` reads, authenticates and parses the graph and proving key for every proof |
+
+A kept circuit holds about 1.4 times the size of its zkey file in memory:
+
+| circuit | kept |
+|---|--:|
+| PIX withdrawal `(10,30)` | 131 MiB |
+| pending `(256,30)` | 86 MiB |
+| PIX aggregation `(2,9,30,6)` | 52 MiB |
+| single aggregation `(2,3,30,6)` | 27 MiB |
+| single withdrawal `(2,30)` | 21 MiB |
+
+Callers that prove through `curvy-witnesscalc` directly get the same cache from
+`ArtifactCache`: `Circuit::prove_bound_cached` and `pending::prove_cached` take one, while
+`Circuit::prove_bound` and `pending::prove` load both artifacts for every proof. A proof
+runs on whichever Rayon pool is current where it is called.
+
 ## Artifacts
 
 Every circuit needs a witness graph and a proving key at runtime. Both are resolved the

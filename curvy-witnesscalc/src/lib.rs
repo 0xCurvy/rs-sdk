@@ -19,6 +19,10 @@
 //! quarter of the size, which loads the same key at the cost of a square root per curve point.
 //! It has its own pin, checked before it is decoded, and must name the pinned zkey as the one it
 //! decodes to; [`Circuit::zkey_path`] says where each is looked for.
+//!
+//! [`Circuit::prove`] and [`Circuit::prove_bound`] load and authenticate both artifacts for every
+//! proof. [`Circuit::prove_bound_cached`] and [`pending::prove_cached`] take them from an
+//! [`ArtifactCache`], which loads each circuit once and keeps it in memory.
 
 use anyhow::{Context, Result, bail};
 use ark_bn254::Fr;
@@ -27,10 +31,12 @@ use curvy_core::field::fr_to_dec;
 use curvy_witness::WitnessGraph;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs::OpenOptions,
+    hash::Hash,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -77,6 +83,9 @@ struct ProofTimingRecord<'a> {
     schema_version: u8,
     unix_time_ms: u128,
     circuit: &'a str,
+    /// The graph and proving key came from an [`ArtifactCache`] that already held them; both
+    /// load times are then 0.
+    artifacts_reused: bool,
     graph_load_ms: u64,
     prover_load_ms: u64,
     witness_ms: u64,
@@ -502,24 +511,56 @@ impl Circuit {
         })
     }
 
-    /// Generate and verify a Groth16 proof.
+    /// The resolved artifact paths and the pins they are checked against.
+    fn artifact_key(&self) -> Result<ArtifactKey> {
+        Ok(ArtifactKey {
+            graph: self.graph_path()?,
+            graph_sha256: self.graph_sha256,
+            zkey: self.zkey_path()?,
+            zkey_sha256: self.zkey_sha256,
+            compact_sha256: self.compact_sha256,
+            num_public: self.num_public,
+        })
+    }
+
+    /// Generate and verify a Groth16 proof, loading and authenticating the graph and the proving
+    /// key for this proof alone.
     pub fn prove(&self, input_json: &str) -> Result<ProofBundle> {
+        self.prove_using(None, input_json)
+    }
+
+    /// Generate and verify a Groth16 proof with the graph and proving key held by `cache`,
+    /// loading them into it on this circuit's first proof.
+    pub fn prove_cached(&self, cache: &ArtifactCache, input_json: &str) -> Result<ProofBundle> {
+        self.prove_using(Some(cache), input_json)
+    }
+
+    fn prove_using(&self, cache: Option<&ArtifactCache>, input_json: &str) -> Result<ProofBundle> {
         let total_started = Instant::now();
 
-        let phase_started = Instant::now();
-        let calc = self.load_calculator()?;
-        let graph_load_ms = phase_started.elapsed().as_millis() as u64;
+        let mut graph_load_ms = 0;
+        let mut prover_load_ms = 0;
+        let mut load = || -> Result<LoadedCircuit> {
+            let phase_started = Instant::now();
+            let calculator = self.load_calculator()?;
+            graph_load_ms = phase_started.elapsed().as_millis() as u64;
+
+            let phase_started = Instant::now();
+            let prover = self.load_prover()?;
+            prover_load_ms = phase_started.elapsed().as_millis() as u64;
+            Ok(LoadedCircuit { calculator, prover })
+        };
+        let (loaded, artifacts_reused) = match cache {
+            Some(cache) => cache.slots.get_or_load(self.artifact_key()?, load)?,
+            None => (Arc::new(load()?), false),
+        };
 
         let phase_started = Instant::now();
-        let prover = self.load_prover()?;
-        let prover_load_ms = phase_started.elapsed().as_millis() as u64;
-
-        let phase_started = Instant::now();
-        let assignment = calc.calculate(input_json)?;
+        let assignment = loaded.calculator.calculate(input_json)?;
         let witness_ms = phase_started.elapsed().as_millis() as u64;
 
         let phase_started = Instant::now();
-        let bundle = prover.prove_assignment(&assignment)?;
+        let bundle = loaded.prover.prove_assignment(&assignment)?;
         let groth16_ms = phase_started.elapsed().as_millis() as u64;
         let total_ms = total_started.elapsed().as_millis() as u64;
 
@@ -530,6 +571,7 @@ impl Circuit {
                 .unwrap_or_default()
                 .as_millis(),
             circuit: self.key,
+            artifacts_reused,
             graph_load_ms,
             prover_load_ms,
             witness_ms,
@@ -539,6 +581,7 @@ impl Circuit {
 
         tracing::info!(
             circuit = self.key,
+            artifacts_reused,
             graph_load_ms,
             prover_load_ms,
             witness_ms,
@@ -556,7 +599,27 @@ impl Circuit {
     /// proof is made with the binding's `x` and refused unless its public signals are the
     /// binding's `[commitment, y, x]`. A pending-notes commitment is proved with
     /// [`pending::prove`] instead: its words depend on the notes tree.
+    ///
+    /// The graph and proving key are loaded for this proof alone, as by [`Self::prove`].
     pub fn prove_bound(&self, input: &serde_json::Value) -> Result<BoundProof> {
+        self.prove_bound_using(None, input)
+    }
+
+    /// [`Self::prove_bound`] with the graph and proving key held by `cache`, loading them into it
+    /// on this circuit's first proof.
+    pub fn prove_bound_cached(
+        &self,
+        cache: &ArtifactCache,
+        input: &serde_json::Value,
+    ) -> Result<BoundProof> {
+        self.prove_bound_using(Some(cache), input)
+    }
+
+    fn prove_bound_using(
+        &self,
+        cache: Option<&ArtifactCache>,
+        input: &serde_json::Value,
+    ) -> Result<BoundProof> {
         let words = words::from_input(self.layout, input)
             .with_context(|| format!("{}: calldata words", self.key))?;
         let binding =
@@ -574,17 +637,18 @@ impl Circuit {
         {
             bail!("{}: circuit input already carries x", self.key);
         }
-        self.prove_bound_input(&serde_json::to_string(&input)?, words, binding)
+        self.prove_bound_input(cache, &serde_json::to_string(&input)?, words, binding)
     }
 
     /// Prove `input_json`, which carries `binding.x`, and check the proof is bound to `words`.
     pub(crate) fn prove_bound_input(
         &self,
+        cache: Option<&ArtifactCache>,
         input_json: &str,
         words: Vec<Fr>,
         binding: CalldataBinding,
     ) -> Result<BoundProof> {
-        let bundle = self.prove(input_json)?;
+        let bundle = self.prove_using(cache, input_json)?;
         let expected = binding.public_signals().map(|signal| fr_to_dec(&signal));
         if bundle.public_signals != expected {
             bail!(
@@ -607,6 +671,133 @@ impl Circuit {
 enum ProvingKey {
     Zkey(Vec<u8>),
     Compact(Vec<u8>),
+}
+
+/// A circuit's authenticated witness graph and proving key.
+struct LoadedCircuit {
+    calculator: GraphWitnessCalculator,
+    prover: Prover,
+}
+
+/// What a loaded circuit was loaded from: the resolved artifact paths and their pins.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ArtifactKey {
+    graph: PathBuf,
+    graph_sha256: &'static str,
+    zkey: PathBuf,
+    zkey_sha256: &'static str,
+    compact_sha256: &'static str,
+    num_public: usize,
+}
+
+/// Circuits loaded for reuse across proofs.
+///
+/// A circuit's first proof through the cache loads and authenticates its graph and proving key,
+/// and later proofs reuse them. Entries are keyed by the resolved artifact paths and the pins
+/// they were checked against, so a circuit whose variables now point elsewhere is loaded again.
+/// A load that fails is not kept. Concurrent first proofs of one circuit load it once; proofs of
+/// other circuits do not wait for that load.
+///
+/// Each entry keeps its parsed graph and proving key in memory, about 1.4 times the size of its
+/// zkey file, until the cache is cleared or dropped.
+pub struct ArtifactCache {
+    slots: Slots<ArtifactKey, LoadedCircuit>,
+}
+
+impl ArtifactCache {
+    pub fn new() -> Self {
+        Self {
+            slots: Slots::default(),
+        }
+    }
+
+    /// Number of circuits currently loaded.
+    pub fn len(&self) -> usize {
+        self.slots.loaded()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Drop every loaded circuit. Proofs already running keep the artifacts they hold.
+    pub fn clear(&self) {
+        self.slots.clear();
+    }
+}
+
+impl Default for ArtifactCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One slot per key, each holding a value loaded on first use.
+struct Slots<K, V> {
+    slots: Mutex<HashMap<K, Arc<Slot<V>>>>,
+}
+
+struct Slot<V> {
+    value: OnceLock<Arc<V>>,
+    /// Held while the value is loaded, so a key is loaded by one caller at a time.
+    loading: Mutex<()>,
+}
+
+impl<K, V> Default for Slots<K, V> {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K: Eq + Hash, V> Slots<K, V> {
+    /// The value under `key`, and whether it was already loaded. When it was not, `load` runs
+    /// under the key's own lock, so concurrent callers for that key wait for one load and callers
+    /// for other keys do not. A failed load returns its error and stores nothing.
+    fn get_or_load(&self, key: K, load: impl FnOnce() -> Result<V>) -> Result<(Arc<V>, bool)> {
+        let slot = Arc::clone(
+            self.slots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(key)
+                .or_insert_with(|| {
+                    Arc::new(Slot {
+                        value: OnceLock::new(),
+                        loading: Mutex::new(()),
+                    })
+                }),
+        );
+        if let Some(value) = slot.value.get() {
+            return Ok((Arc::clone(value), true));
+        }
+        // A load that panicked stored nothing, so a poisoned lock guards nothing inconsistent.
+        let _loading = slot.loading.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(value) = slot.value.get() {
+            return Ok((Arc::clone(value), true));
+        }
+        let loaded = Arc::new(load()?);
+        let _ = slot.value.set(Arc::clone(&loaded));
+        Ok((loaded, false))
+    }
+
+    /// Number of keys whose value is loaded.
+    fn loaded(&self) -> usize {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|slot| slot.value.get().is_some())
+            .count()
+    }
+
+    /// Forget every slot. A load still running keeps its value for its own caller only.
+    fn clear(&self) {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
 }
 
 /// A pinned prover for one circuit.
@@ -757,6 +948,77 @@ mod tests {
             error.to_string().contains("zkey sha256 mismatch"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn a_slot_loads_once_and_each_key_has_its_own() {
+        let slots = Slots::<&str, u32>::default();
+        let loads = std::sync::atomic::AtomicUsize::new(0);
+        let load = |value| {
+            loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(value)
+        };
+        let (first, reused) = slots.get_or_load("a", || load(1)).unwrap();
+        assert_eq!((*first, reused), (1, false));
+        let (again, reused) = slots.get_or_load("a", || load(2)).unwrap();
+        assert_eq!((*again, reused), (1, true));
+        assert!(Arc::ptr_eq(&first, &again));
+        let (other, reused) = slots.get_or_load("b", || load(3)).unwrap();
+        assert_eq!((*other, reused), (3, false));
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(slots.loaded(), 2);
+    }
+
+    #[test]
+    fn a_failed_load_is_not_kept() {
+        let slots = Slots::<&str, u32>::default();
+        let error = slots
+            .get_or_load("a", || bail!("missing artifact"))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("missing artifact"), "{error:#}");
+        assert_eq!(slots.loaded(), 0);
+        let (value, reused) = slots.get_or_load("a", || Ok(7)).unwrap();
+        assert_eq!((*value, reused), (7, false));
+    }
+
+    #[test]
+    fn concurrent_first_uses_of_a_key_load_it_once() {
+        let slots = Slots::<&str, u32>::default();
+        let loads = std::sync::atomic::AtomicUsize::new(0);
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    start.wait();
+                    slots
+                        .get_or_load("a", || {
+                            loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            Ok(1)
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn clearing_forgets_loaded_values() {
+        let slots = Slots::<&str, u32>::default();
+        let (held, _) = slots.get_or_load("a", || Ok(1)).unwrap();
+        slots.clear();
+        assert_eq!(slots.loaded(), 0);
+        assert_eq!(*held, 1);
+        let (_, reused) = slots.get_or_load("a", || Ok(2)).unwrap();
+        assert!(!reused);
+    }
+
+    #[test]
+    fn an_artifact_cache_is_shareable_across_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ArtifactCache>();
     }
 
     #[test]

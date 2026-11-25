@@ -60,6 +60,8 @@ alloy = { version = "1", default-features = false, features = [
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The SDK runs proofs on a Rayon pool of its own; curvy-prover schedules on the current pool.
+rayon = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -4,6 +4,7 @@
 
 pub mod account;
 pub mod client;
+pub mod proving;
 pub mod scan;
 pub mod send;
 
@@ -14,6 +15,7 @@ pub use client::{
     PreparedDirectShield, Route, TxLedger, ambiguous_pix_aggregation, ambiguous_submission,
 };
 pub use curvy_types::{CircuitFamily, CircuitRef, PendingNote, PendingNotesEvent};
+pub use proving::ProvingConfig;
 pub use scan::{Discovered, scan_pending_event, scan_pending_note, scan_pending_note_with_viewer};
 pub use send::ShieldKind;
 
@@ -22,3 +24,6 @@ pub use curvy_core;
 
 /// Re-export proving artifact configuration.
 pub use curvy_witnesscalc;
+
+/// Re-export Rayon, whose `ThreadPool` [`ProvingConfig::thread_pool`] takes.
+pub use rayon;

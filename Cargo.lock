@@ -1734,6 +1734,7 @@ dependencies = [
  "curvy-witnesscalc",
  "hex",
  "num-bigint 0.5.1",
+ "rayon",
  "serde_json",
  "sha3 0.10.9",
  "tokio",
