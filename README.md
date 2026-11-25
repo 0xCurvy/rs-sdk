@@ -265,7 +265,7 @@ checkout, and copies the graphs from `artifacts/signet` alongside.
 Nix consumers get the same directory from this repository's flake, pinned to a tag:
 
 ```bash
-nix build github:0xCurvy/rs-sdk/v0.2.2#curvy-zk-artifacts
+nix build github:0xCurvy/rs-sdk/v0.2.3#curvy-zk-artifacts
 CURVY_ZK_KEYS_DIR=$PWD/result
 ```
 
