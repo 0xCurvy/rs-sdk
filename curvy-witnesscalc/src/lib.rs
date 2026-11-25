@@ -564,7 +564,7 @@ impl Circuit {
         let total_ms = total_started.elapsed().as_millis() as u64;
 
         let timing = ProofTimingRecord {
-            schema_version: 1,
+            schema_version: 2,
             unix_time_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
