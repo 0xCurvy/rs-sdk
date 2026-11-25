@@ -23,6 +23,7 @@ use curvy_chain_api::{
 };
 
 use crate::account::{Account, Identity, OwnedNote, parse_fr_decimal};
+use crate::proving::{Proving, ProvingConfig};
 pub use crate::scan::Discovered;
 use crate::scan::scan_pending_events;
 use crate::send::{
@@ -134,21 +135,14 @@ struct BoundCall {
     commitment: String,
 }
 
-/// Prove `input` with a bound circuit on a blocking worker: the words are derived from the input,
-/// and the proof is refused unless it is bound to them.
-async fn prove_bound(
-    circuit: fn() -> curvy_witnesscalc::Circuit,
-    input: serde_json::Value,
-    what: &'static str,
-) -> Result<BoundCall> {
-    let bound = tokio::task::spawn_blocking(move || circuit().prove_bound(&input))
-        .await
-        .with_context(|| format!("join {what} proof"))??;
-    Ok(BoundCall {
-        proof: curvy_abi::proof_from_snarkjs(&bound.proof_json)?,
-        words: bound.words_dec(),
-        commitment: bound.commitment_dec(),
-    })
+impl BoundCall {
+    fn from_bound(bound: &curvy_witnesscalc::BoundProof) -> Result<Self> {
+        Ok(Self {
+            proof: curvy_abi::proof_from_snarkjs(&bound.proof_json)?,
+            words: bound.words_dec(),
+            commitment: bound.commitment_dec(),
+        })
+    }
 }
 
 /// A per-tx ledger entry.
@@ -495,6 +489,7 @@ pub struct CurvyClient {
     storage: Mutex<Storage>,
     /// Per-signer transaction locks.
     nonce_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<SignerNonce>>>>,
+    proving: Arc<Proving>,
 }
 
 impl CurvyClient {
@@ -524,7 +519,33 @@ impl CurvyClient {
             chain_id,
             storage: Mutex::new(Storage::default()),
             nonce_locks: tokio::sync::Mutex::new(HashMap::new()),
+            proving: Arc::new(Proving::new(ProvingConfig::default())),
         }
+    }
+
+    /// Run this client's proofs as `config` says: on which threads, and whether circuit
+    /// artifacts stay loaded between proofs. Without it the client uses
+    /// [`ProvingConfig::default`].
+    pub fn with_proving(mut self, config: ProvingConfig) -> Self {
+        self.proving = Arc::new(Proving::new(config));
+        self
+    }
+
+    /// Prove `input` with a bound circuit on the proving pool: the words are derived from the
+    /// input, and the proof is refused unless it is bound to them.
+    async fn prove_bound(
+        &self,
+        circuit: fn() -> curvy_witnesscalc::Circuit,
+        input: serde_json::Value,
+        what: &'static str,
+    ) -> Result<BoundCall> {
+        let bound = self
+            .proving
+            .run(what, move |cache| {
+                circuit().prove_bound_cached(cache, &input)
+            })
+            .await?;
+        BoundCall::from_bound(&bound)
     }
 
     /// The aggregator's live tree state (trust anchor), as an anyhow result.
@@ -1341,10 +1362,12 @@ impl CurvyClient {
         let note_ids = pending.note_ids().iter().map(fr_to_dec).collect::<Vec<_>>();
         let new_root = fr_to_dec(&pending.new_notes_root);
 
-        let bound =
-            tokio::task::spawn_blocking(move || curvy_witnesscalc::pending::prove(&pending))
-                .await
-                .context("join prove")??;
+        let bound = self
+            .proving
+            .run("pending-notes commitment", move |cache| {
+                curvy_witnesscalc::pending::prove_cached(cache, &pending)
+            })
+            .await?;
         let proof = curvy_abi::proof_from_snarkjs(&bound.proof_json)?;
 
         let circuit = match family {
@@ -1573,12 +1596,13 @@ impl CurvyClient {
         }
         input["gasFeeSiblings"] = gas_fee_siblings.into();
         input["commitPendingNotesGasFeeRoot"] = gas_fee_root.into();
-        let bound = prove_bound(
-            curvy_witnesscalc::Circuit::aggregation,
-            input,
-            "aggregation",
-        )
-        .await?;
+        let bound = self
+            .prove_bound(
+                curvy_witnesscalc::Circuit::aggregation,
+                input,
+                "aggregation",
+            )
+            .await?;
 
         let calldata = curvy_abi::encode_submit_aggregation(
             SINGLE_MAX_INPUTS,
@@ -1812,12 +1836,13 @@ impl CurvyClient {
         witness.gas_fee_siblings = gas_fee_siblings;
         witness.commit_pending_notes_gas_fee_root = gas_fee_root;
 
-        let bound = prove_bound(
-            curvy_witnesscalc::Circuit::pix_aggregation,
-            serde_json::to_value(&witness)?,
-            "PIX aggregation",
-        )
-        .await?;
+        let bound = self
+            .prove_bound(
+                curvy_witnesscalc::Circuit::pix_aggregation,
+                serde_json::to_value(&witness)?,
+                "PIX aggregation",
+            )
+            .await?;
         let mut emitted_notes = regular_outputs;
         emitted_notes.push(fee);
         let request_key = curvy_abi::relay_request_key(
@@ -1983,12 +2008,13 @@ impl CurvyClient {
             token,
         )
         .context("withdrawal witness")?;
-        let bound = prove_bound(
-            curvy_witnesscalc::Circuit::withdrawal,
-            serde_json::to_value(&w)?,
-            "withdrawal",
-        )
-        .await?;
+        let bound = self
+            .prove_bound(
+                curvy_witnesscalc::Circuit::withdrawal,
+                serde_json::to_value(&w)?,
+                "withdrawal",
+            )
+            .await?;
         let calldata = curvy_abi::encode_submit_withdrawal(
             SINGLE_MAX_INPUTS,
             CORE_CIRCUIT,
@@ -2082,12 +2108,13 @@ impl CurvyClient {
             destination_field,
             token,
         )?;
-        let bound = prove_bound(
-            curvy_witnesscalc::Circuit::withdrawal,
-            serde_json::to_value(&witness)?,
-            "withdrawal",
-        )
-        .await?;
+        let bound = self
+            .prove_bound(
+                curvy_witnesscalc::Circuit::withdrawal,
+                serde_json::to_value(&witness)?,
+                "withdrawal",
+            )
+            .await?;
         let calldata = curvy_abi::encode_submit_withdrawal(
             SINGLE_MAX_INPUTS,
             CORE_CIRCUIT,
@@ -2212,12 +2239,13 @@ impl CurvyClient {
                 token,
             )?
         };
-        let bound = prove_bound(
-            curvy_witnesscalc::Circuit::pix_withdrawal,
-            serde_json::to_value(&witness)?,
-            "PIX multi-owner withdrawal",
-        )
-        .await?;
+        let bound = self
+            .prove_bound(
+                curvy_witnesscalc::Circuit::pix_withdrawal,
+                serde_json::to_value(&witness)?,
+                "PIX multi-owner withdrawal",
+            )
+            .await?;
         // Complete fallible calculations before submission.
         let total = spends.iter().try_fold(0u128, |total, (_, note)| {
             total
