@@ -6,6 +6,10 @@
 
 pub mod chain;
 
+/// The `reqwest` this crate is built against, for building a client to pass to
+/// [`BlokliChain::with_client`].
+pub use reqwest;
+
 use async_trait::async_trait;
 use curvy_chain_api::{ChainError, NoteIndexSource, Result, TxSubmitter};
 use curvy_types::{
@@ -137,12 +141,24 @@ impl Position {
 }
 
 impl BlokliChain {
+    /// Builds a client with a 30 s request timeout.
     pub fn new(base: impl Into<String>) -> Self {
-        Self {
-            client: reqwest::Client::builder()
+        Self::with_client(
+            base,
+            reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
+        )
+    }
+
+    /// Routes requests through `client` instead of a default one.
+    ///
+    /// The client's own settings (timeouts, DNS overrides, proxies, TLS) apply as
+    /// given; none of the defaults from [`BlokliChain::new`] are added.
+    pub fn with_client(base: impl Into<String>, client: reqwest::Client) -> Self {
+        Self {
+            client,
             base: base.into(),
             confirmations: 1,
         }
@@ -753,6 +769,45 @@ mod tests {
 
         let mut repeated = vec!["11".to_string(), "22".to_string()];
         assert!(push_dense_leaf(&mut repeated, 1, "33".into()).is_err());
+    }
+
+    /// `blokli.test` reaches the local listener only through the client's DNS override.
+    #[tokio::test]
+    async fn requests_go_through_the_supplied_client() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0, "connection closed before the request headers ended");
+                request.extend_from_slice(&buf[..n]);
+            }
+            let body = r#"{"status":"ready"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("blokli.test", addr)
+            .build()
+            .unwrap();
+        let chain = BlokliChain::with_client(format!("http://blokli.test:{}", addr.port()), client);
+
+        assert!(chain.is_ready().await);
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /readyz "), "{request}");
     }
 
     #[test]

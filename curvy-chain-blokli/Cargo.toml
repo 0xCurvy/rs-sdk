@@ -17,3 +17,6 @@ reqwest = { workspace = true }
 serde_json = { workspace = true }
 # Hex32 note ids / batch indices are converted to the decimal Dec the seam speaks.
 num-bigint = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
