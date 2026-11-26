@@ -166,6 +166,13 @@ test asserts no transaction reports another backend.
 Blokli's `curvy*` resolvers perform direct contract reads. `sync()` reconciles the
 locally rebuilt tree against the on-chain root before spending notes.
 
+| constructor | HTTP client |
+|---|---|
+| `BlokliChain::new(url)` | built in, 30 s request timeout |
+| `BlokliChain::with_client(url, client)` | the given `reqwest::Client`, used as is (DNS overrides, proxies, timeouts, TLS) |
+
+Build the client with `curvy_chain_blokli::reqwest` so its type matches the crate's.
+
 `curvy-chain-blokli` targets the `curvy-events-finalized` schema: union-wrapped
 `curvy*` queries, `Hex32` note ids converted to decimal at the adapter, and
 exclusive `after`-cursor pagination followed to exhaustion. Blokli caps `first` at
@@ -265,7 +272,7 @@ checkout, and copies the graphs from `artifacts/signet` alongside.
 Nix consumers get the same directory from this repository's flake, pinned to a tag:
 
 ```bash
-nix build github:0xCurvy/rs-sdk/v0.2.3#curvy-zk-artifacts
+nix build github:0xCurvy/rs-sdk/v0.2.4#curvy-zk-artifacts
 CURVY_ZK_KEYS_DIR=$PWD/result
 ```
 
